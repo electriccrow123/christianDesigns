@@ -1,5 +1,7 @@
 # 📈 TradeTrainer: Stock & Options Paper-Trading Game
 
+> Also in this repo: **[Starhome](starship/README.md)**, a WebXR game that turns your room into the bridge of a starship (`npm run starship`).
+
 Practice trading **stocks and option contracts** with fake money at **real, current market prices**.
 A built-in coach gives tips and trading strategies, explains how and where to place each trade, and
 tracks your profit/loss, balance and progress. You can reset the account at any time.

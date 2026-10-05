@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Starhome VR</title>
+  <meta name="description" content="Turn your room into the bridge of a starship. A WebXR mixed reality game for VR headsets.">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <section id="landing">
+    <div class="stars"></div>
+    <div class="card">
+      <p class="kicker">U.S.S. STARHOME</p>
+      <h1>Your room is the bridge.</h1>
+      <p class="lead">Put on your headset. Starhome scans your room, cuts windows into your walls and turns your home into a starship.
+        Fly through procedurally generated star systems, fight off pirates and boarders, and crew your ship with AI bots.</p>
+      <div id="xr-status" class="warn">Checking for a VR headset...</div>
+      <div class="buttons">
+        <button id="btn-ar" class="primary" disabled>Connect headset &amp; scan my room<small>Mixed reality (passthrough)</small></button>
+        <button id="btn-vr" disabled>Enter VR<small>Fully virtual ship</small></button>
+        <button id="btn-desktop" class="ghost">Play in this browser<small>Mouse &amp; keyboard preview</small></button>
+      </div>
+      <ul class="features">
+        <li><b>Room scan</b> maps walls, floor, couch and tables</li>
+        <li><b>Windows</b> on any wall show open space</li>
+        <li><b>Bridge console</b> by your couch: throttle, joystick, switches, keyboard</li>
+        <li><b>Armory</b>: blasters, plasma saber, grenades, riot shield</li>
+        <li><b>Ship systems</b>: phasers, torpedoes, shields, cloak, warp drive</li>
+        <li><b>AI crew</b>: cleaning, chef, repair, security, medic and combat drones</li>
+      </ul>
+      <p class="fine">Best on Meta Quest 3 / 3S / Pro with Space Setup done. Needs HTTPS. Progress saves in this browser.</p>
+    </div>
+  </section>
+
+  <div id="hud">
+    <div id="crosshair"></div>
+    <div id="hud-stats"></div>
+    <div id="toast"></div>
+    <div id="typing-hint">Typing on the bridge terminal — Enter to run, Esc to stop</div>
+    <div id="help">
+      <h3>Desktop controls</h3>
+      <p><b>Click</b> look around (mouse) · <b>WASD</b> walk · <b>C</b> sit / stand</p>
+      <p><b>Left click</b> press buttons, flip switches, fire held weapon · <b>drag</b> the throttle and joystick</p>
+      <p><b>Right click / G</b> grab or drop the item you aim at · <b>E</b> use</p>
+      <p><b>Arrows</b> pitch/yaw · <b>Z/X</b> roll · <b>R/F</b> throttle · <b>Shift</b> pulse boost</p>
+      <p><b>Space</b> phasers · <b>M</b> torpedo · <b>N</b> next target</p>
+      <p><b>Tab</b> tablet (shop, map, crew, build) · <b>B</b> build mode · <b>T</b> type on terminal · <b>H</b> this help</p>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
