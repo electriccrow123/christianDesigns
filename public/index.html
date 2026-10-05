@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TradeTrainer — Stock & Options Paper Trading Game</title>
+  <meta name="description" content="Practice trading stocks and options with fake money at real market prices." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📈 <span>Trade<b>Trainer</b></span></div>
+    <div class="stats">
+      <div class="stat"><label>Account value</label><strong id="st-equity">—</strong></div>
+      <div class="stat"><label>Cash</label><strong id="st-cash">—</strong></div>
+      <div class="stat"><label>Buying power</label><strong id="st-bp">—</strong></div>
+      <div class="stat"><label>Today</label><strong id="st-day">—</strong></div>
+      <div class="stat"><label>Total P/L</label><strong id="st-total">—</strong></div>
+    </div>
+    <div class="top-actions">
+      <span id="market-badge" class="badge">Market —</span>
+      <button id="btn-reset" class="btn ghost" title="Start over with a fresh balance">↺ Reset</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="trade">Trade</button>
+    <button class="tab" data-view="portfolio">Portfolio</button>
+    <button class="tab" data-view="orders">Orders & History</button>
+    <button class="tab" data-view="learn">Learn</button>
+    <button class="tab" data-view="progress">Achievements</button>
+  </nav>
+
+  <main>
+    <!-- ================= TRADE ================= -->
+    <section id="view-trade" class="view active">
+      <div class="trade-grid">
+        <aside class="panel side">
+          <div class="search">
+            <input id="search" type="search" placeholder="Search ticker or company…" autocomplete="off" />
+            <ul id="search-results" class="search-results"></ul>
+          </div>
+          <h3 class="panel-title">Watchlist</h3>
+          <ul id="watchlist" class="watchlist"></ul>
+          <div class="tip-box">
+            <div class="tip-head">💡 Tip <button id="next-tip" class="link">next</button></div>
+            <p id="tip-text"></p>
+          </div>
+        </aside>
+
+        <div class="panel center">
+          <div id="quote-head" class="quote-head"></div>
+          <div class="chart-wrap">
+            <div class="ranges" id="ranges">
+              <button data-range="1d" class="active">1D</button><button data-range="5d">5D</button><button data-range="1mo">1M</button><button data-range="6mo">6M</button><button data-range="1y">1Y</button><button data-range="5y">5Y</button>
+            </div>
+            <canvas id="price-chart" height="260"></canvas>
+            <div id="chart-msg" class="chart-msg"></div>
+          </div>
+          <div class="subtabs">
+            <button class="subtab active" data-sub="overview">Overview</button>
+            <button class="subtab" data-sub="chain">Options Chain</button>
+          </div>
+          <div id="sub-overview" class="sub active"></div>
+          <div id="sub-chain" class="sub">
+            <div class="chain-controls">
+              <label>Expiration <select id="exp-select"></select></label>
+              <label>Strikes <select id="strike-range"><option value="10">±10 near price</option><option value="20">±20</option><option value="all">All</option></select></label>
+              <span class="hint">Click a <b>Ask</b> to buy · Click a <b>Bid</b> to sell</span>
+            </div>
+            <div id="chain" class="chain"></div>
+          </div>
+        </div>
+
+        <aside class="panel ticket">
+          <h3 class="panel-title">Order Ticket</h3>
+          <div id="ticket"></div>
+          <h3 class="panel-title">Coach</h3>
+          <ul id="coach" class="coach"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ================= PORTFOLIO ================= -->
+    <section id="view-portfolio" class="view">
+      <div class="cards" id="pf-cards"></div>
+      <div class="panel">
+        <h3 class="panel-title">Account value over time</h3>
+        <canvas id="equity-chart" height="200"></canvas>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">Positions</h3>
+        <div id="positions" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ================= ORDERS ================= -->
+    <section id="view-orders" class="view">
+      <div class="panel">
+        <h3 class="panel-title">Working orders</h3>
+        <div id="orders" class="table-wrap"></div>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">Trade history</h3>
+        <div id="history" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ================= LEARN ================= -->
+    <section id="view-learn" class="view">
+      <div class="panel intro">
+        <h2>Trading School</h2>
+        <p>Every strategy below includes <b>what</b> it is, <b>when</b> to use it, <b>how</b> to place it in this game step-by-step, and <b>where</b> to put your strike, stop or limit. Hit <b>Practice it</b> to jump straight to the trade screen.</p>
+      </div>
+      <div id="strategies" class="strategies"></div>
+      <div class="panel">
+        <h3 class="panel-title">Glossary</h3>
+        <dl id="glossary" class="glossary"></dl>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">How this game works</h3>
+        <ul class="rules">
+          <li>Prices are real market data (delayed up to ~15 minutes, depending on the exchange). Refreshes every 15 seconds.</li>
+          <li><b>Stocks</b> fill at the last price. <b>Options</b> fill realistically: buys at the <b>ask</b>, sells at the <b>bid</b> (last price if there’s no quote).</li>
+          <li>Option commissions are $0.65 per contract (adjustable on Reset). Stock trades are commission-free.</li>
+          <li>Selling calls requires 100 shares per contract (covered calls). Selling puts reserves strike × 100 in cash (cash-secured puts). Short selling stock is disabled.</li>
+          <li>Limit and stop orders are “good ’til canceled” and are checked on each price refresh while the game is open.</li>
+          <li>Options left open at expiration are cash-settled at intrinsic value (in-the-money) or expire worthless.</li>
+          <li>Your game is saved in this browser. Use <b>Reset</b> any time to start over.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================= PROGRESS ================= -->
+    <section id="view-progress" class="view">
+      <div class="panel">
+        <h3 class="panel-title">Achievements</h3>
+        <div id="achievements" class="achievements"></div>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">Trading stats</h3>
+        <div id="trade-stats" class="cards"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Reset dialog -->
+  <dialog id="reset-dialog">
+    <form method="dialog" class="dialog">
+      <h2>Start a new game</h2>
+      <p>This clears all positions, orders and history.</p>
+      <label>Starting balance
+        <select id="reset-balance">
+          <option value="5000">$5,000</option>
+          <option value="10000">$10,000</option>
+          <option value="25000">$25,000</option>
+          <option value="50000">$50,000</option>
+          <option value="100000" selected>$100,000</option>
+          <option value="1000000">$1,000,000</option>
+        </select>
+      </label>
+      <label>Option commission per contract
+        <select id="reset-fee"><option value="0.65" selected>$0.65 (typical broker)</option><option value="0">$0 (commission-free)</option></select>
+      </label>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn ghost">Cancel</button>
+        <button value="confirm" id="reset-confirm" class="btn danger">Reset account</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Order confirm dialog -->
+  <dialog id="confirm-dialog">
+    <form method="dialog" class="dialog">
+      <h2 id="confirm-title">Review order</h2>
+      <div id="confirm-body"></div>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn ghost">Edit</button>
+        <button value="confirm" class="btn primary" id="confirm-go">Place order</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

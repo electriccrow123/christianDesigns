@@ -1,0 +1,14 @@
+{
+  "name": "stock-trader-training-game",
+  "version": "1.0.0",
+  "description": "Paper-trading training game: buy and sell stocks and option contracts with fake money at real market prices, with built-in coaching.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
