@@ -1,0 +1,15 @@
+{
+  "name": "Starhome VR",
+  "short_name": "Starhome",
+  "description": "Turn your room into the bridge of a starship. A mixed reality game for Meta Quest.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#02060d",
+  "theme_color": "#02060d",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

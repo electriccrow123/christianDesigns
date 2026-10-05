@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Starhome VR</title>
   <meta name="description" content="Turn your room into the bridge of a starship. A WebXR mixed reality game for VR headsets.">
+  <meta name="theme-color" content="#02060d">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="css/style.css">
   <script type="importmap">
     {
@@ -60,5 +64,8 @@
   </div>
 
   <script type="module" src="js/main.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  </script>
 </body>
 </html>

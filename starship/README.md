@@ -7,7 +7,15 @@ fight pirates and boarding parties, and buy upgrades and AI crew for your ship.
 
 No build step and no install: it is static HTML + JavaScript using [three.js](https://threejs.org) from a CDN.
 
-## Play it
+## Play it online (Meta Quest 3)
+
+**https://electriccrow123.github.io/christianDesigns/starship/**
+
+Open that address in the **Meta Quest Browser**. To get it in your app library, open the browser's
+menu (⋯) and choose **Install app** (or add it to bookmarks). The site is hosted free on GitHub Pages. To turn
+Pages on once: GitHub repo → **Settings → Pages → Build and deployment → Source: Deploy from a branch**, pick the
+branch that has the `starship/` folder and the `/ (root)` folder, then **Save**. Every push to that branch updates the site.
+
 
 | Where | How |
 | --- | --- |
