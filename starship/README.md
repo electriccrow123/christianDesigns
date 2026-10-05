@@ -34,6 +34,17 @@ adb reverse tcp:8080 tcp:8080
 
 Or upload the `starship/` folder to any HTTPS static host (GitHub Pages, Netlify, Cloudflare Pages...).
 
+## Play it on your PC
+
+1. Download the game: **https://github.com/electriccrow123/christianDesigns/archive/refs/heads/claude/vr-spaceship-home-f8cvrs.zip**
+   and unzip it (right-click → *Extract All*).
+2. Open the `starship` folder and double-click **`Start Starhome.bat`** (Windows) or `start-starhome.command` (Mac/Linux).
+   A small window opens (keep it open) and the game opens in your browser at `http://localhost:8080`.
+   On Windows nothing needs installing; if Windows SmartScreen warns, click *More info → Run anyway*.
+3. Click **Play in this browser** for mouse & keyboard, or put on your headset for PC VR:
+   connect a Quest with **Quest Link / Air Link** (or use any SteamVR/OpenXR headset), open the page in
+   **Chrome or Edge**, and click **Enter VR**.
+
 ## What's in the game
 
 **Room scan & building**
