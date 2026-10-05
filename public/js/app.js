@@ -1,6 +1,7 @@
 import * as E from './engine.js';
 import { STRATEGIES, GLOSSARY, randomTip, reviewOrder, afterTrade } from './coach.js';
 import { lineChart, payoffChart } from './charts.js';
+import * as data from './data.js';
 
 // ---------------------------------------------------------------- state
 const SAVE_KEY = 'tradetrainer.game.v1';
@@ -32,12 +33,14 @@ function load(key) {
   }
 }
 function save() {
+  game.savedAt = Date.now();
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(game));
     localStorage.setItem(WATCH_KEY, JSON.stringify(watchlist));
   } catch {
     /* storage full or blocked — game still works for this session */
   }
+  data.saveGame(game, watchlist);
 }
 
 // ---------------------------------------------------------------- utils
@@ -56,11 +59,10 @@ const big = (n) => {
 const fmtExp = (exp) => new Date(exp * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 const contractLabel = (p) => `${p.symbol} ${fmtExp(p.expiration)} $${p.strike} ${p.right === 'call' ? 'Call' : 'Put'}`;
 
-async function api(path) {
-  const res = await fetch(path);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data;
+function setBanner(msg) {
+  const el = $('#data-banner');
+  el.hidden = !msg;
+  el.textContent = msg || '';
 }
 
 function toast(msg, kind = '') {
@@ -88,34 +90,30 @@ function trackedSymbols() {
 
 async function refreshQuotes() {
   try {
-    const { quotes: list } = await api(`/api/quote?symbols=${encodeURIComponent(trackedSymbols().join(','))}`);
-    for (const q of list) quotes[q.symbol] = q;
-    $('#chart-msg').dataset.err = '';
+    const list = await data.quotes(trackedSymbols());
+    for (const q of list) quotes[q.symbol] = { ...(quotes[q.symbol] || {}), ...q };
+    setBanner('');
   } catch (e) {
-    toast(`⚠️ Live prices unavailable: ${esc(e.message)}`, 'bad');
+    setBanner(`Live prices unavailable: ${e.message}`);
   }
   await refreshOptionQuotes();
   tick();
 }
 
 async function refreshOptionQuotes() {
-  const groups = new Map();
-  const add = (symbol, expiration) => groups.set(`${symbol}|${expiration}`, { symbol, expiration });
-  for (const p of E.optionPositions(game)) add(p.symbol, p.expiration);
-  for (const o of game.orders) if (o.asset === 'option') add(o.symbol, o.contract.expiration);
-  if (ticket.contract) add(ticket.contract.symbol, ticket.contract.expiration);
-  await Promise.all(
-    [...groups.values()].map(async ({ symbol, expiration }) => {
-      if (E.daysToExpiry(expiration) <= 0) return;
-      try {
-        const chain = await api(`/api/options?symbol=${symbol}&date=${expiration}`);
-        ingestChain(symbol, chain);
-        if (current.chain && current.symbol === symbol && current.chain.expiration === chain.expiration) current.chain = chain;
-      } catch {
-        /* keep last known marks */
-      }
-    }),
-  );
+  const wanted = new Map();
+  const add = (c) => c && E.daysToExpiry(c.expiration) > 0 && wanted.set(c.contract, c);
+  for (const p of E.optionPositions(game)) add(p);
+  for (const o of game.orders) if (o.asset === 'option') add(o.contract);
+  add(ticket.contract);
+  if (!wanted.size) return;
+  try {
+    const fresh = await data.contractQuotes([...wanted.values()]);
+    Object.assign(optionQuotes, fresh);
+    if (current.chain) for (const c of [...current.chain.calls, ...current.chain.puts]) if (fresh[c.contract]) Object.assign(c, fresh[c.contract]);
+  } catch {
+    /* keep last known marks */
+  }
 }
 
 function ingestChain(symbol, chain) {
@@ -155,12 +153,12 @@ async function loadChart() {
   msg.textContent = 'Loading chart…';
   const sym = current.symbol;
   try {
-    const data = await api(`/api/chart?symbol=${encodeURIComponent(sym)}&range=${current.range}`);
+    const series = await data.chart(sym, current.range);
     if (sym !== current.symbol) return;
-    msg.textContent = data.points.length < 2 ? 'No chart data for this range.' : '';
+    msg.textContent = series.points.length < 2 ? 'No chart data for this range.' : '';
     const intraday = current.range === '1d' || current.range === '5d';
-    lineChart(canvas, data.points, {
-      baseline: current.range === '1d' ? data.previousClose : undefined,
+    lineChart(canvas, series.points, {
+      baseline: current.range === '1d' ? series.previousClose : undefined,
       valueFmt: (v) => v.toFixed(2),
       timeFmt: (t, long) => {
         const d = new Date(t * 1000);
@@ -179,7 +177,7 @@ async function loadChain(date) {
   const sym = current.symbol;
   $('#chain').innerHTML = '<div class="empty">Loading option chain…</div>';
   try {
-    const chain = await api(`/api/options?symbol=${encodeURIComponent(sym)}${date ? `&date=${date}` : ''}`);
+    const chain = await data.chain(sym, date);
     if (sym !== current.symbol) return;
     if (!date && E.daysToExpiry(chain.expiration) < 14) {
       // For learning, default to a ~30-45 day expiration rather than one that expires this week.
@@ -349,7 +347,7 @@ function renderChain() {
     .join('');
   $('#chain').innerHTML = `<table>
     <thead><tr><th colspan="6" class="side up">Calls</th><th></th><th colspan="6" class="side down">Puts</th></tr>
-    <tr><th>OI</th><th>Vol</th><th>IV</th><th>Last</th><th>Bid</th><th>Ask</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Last</th><th>IV</th><th>Vol</th><th>OI</th></tr></thead>
+    <tr><th>OI</th><th>Vol</th><th>IV</th><th>${data.priceLabel}</th><th>Bid</th><th>Ask</th><th>Strike</th><th>Bid</th><th>Ask</th><th>${data.priceLabel}</th><th>IV</th><th>Vol</th><th>OI</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="13" class="empty">No contracts.</td></tr>'}</tbody></table>`;
 }
 
@@ -403,7 +401,7 @@ function renderTicketLive() {
     const g = S ? E.greeks({ S, K: c.strike, T: Math.max(dte, 0.5) / 365, iv: oq.iv, right: c.right }) : null;
     $('#t-contract').innerHTML = `<div class="contract-box">
       <div class="title">${esc(contractLabel(c))} <span class="tag ${c.right}">${c.right.toUpperCase()}</span></div>
-      <div class="muted">${dte.toFixed(1)} days to expiry · ${oq.itm ? 'In the money' : 'Out of the money'}</div>
+      <div class="muted">${dte.toFixed(1)} days to expiry · ${S && (c.right === 'call' ? S > c.strike : S < c.strike) ? 'In the money' : 'Out of the money'}</div>
       <div class="num">Bid ${oq.bid?.toFixed(2) ?? '—'} · Ask ${oq.ask?.toFixed(2) ?? '—'} · Last ${oq.last?.toFixed(2) ?? '—'}</div>
       ${g ? `<div class="num muted">Δ ${g.delta.toFixed(2)} · Θ ${(g.theta * 100).toFixed(2)}/day per contract · IV ${((oq.iv || 0) * 100).toFixed(0)}% · ${(g.probITM * 100).toFixed(0)}% ITM</div>` : ''}
       <button class="link" data-asset="stock">← back to stock</button>
@@ -708,7 +706,7 @@ function bind() {
     if (!q) return ($('#search-results').innerHTML = '');
     timer = setTimeout(async () => {
       try {
-        const { results } = await api(`/api/search?q=${encodeURIComponent(q)}`);
+        const results = await data.search(q);
         $('#search-results').innerHTML = results.length
           ? results.map((r) => `<li data-pick="${esc(r.symbol)}"><b>${esc(r.symbol)}</b><small>${esc(r.name)} · ${esc(r.exchange || r.type)}</small></li>`).join('')
           : '<li class="muted">No matches</li>';
@@ -904,6 +902,13 @@ function bind() {
 
 // ---------------------------------------------------------------- boot
 bind();
+data.loadGame().then((remote) => {
+  if (!remote?.game || (remote.game.savedAt || 0) <= (game.savedAt || 0)) return;
+  game = remote.game;
+  if (remote.watchlist?.length) watchlist = remote.watchlist;
+  ticket = freshTicket('stock');
+  refreshQuotes();
+}).catch(() => {});
 renderLearn();
 renderTip();
 renderAll();

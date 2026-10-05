@@ -15,6 +15,18 @@ npm start
 
 Use `PORT=8080 npm start` to choose a different port.
 
+## Play it on the web
+
+The hosted version runs on claude.ai: https://claude.ai/artifact/1echBMoEEpDDUa28y2uKVY
+
+It gets live stock and option prices through each player's own **Robinhood connector** (read-only market-data
+tools; the game never places real orders) and saves every player's game privately to their account, so progress
+follows them between devices. Rebuild the page after changing the code with:
+
+```bash
+node scripts/build-web.mjs   # -> dist/tradetrainer.html
+```
+
 ## Features
 
 | Area | What you get |
@@ -38,7 +50,10 @@ server.js            Zero-dependency Node server: serves /public and proxies mar
 public/js/engine.js  Pure trading engine: orders, fills, collateral, P/L, expiration, Greeks.
 public/js/coach.js   Strategy lessons, glossary, tips and context-aware trade feedback.
 public/js/charts.js  Canvas charts (price, equity curve, option payoff).
+public/js/data.js    Market data for the self-hosted version (talks to server.js).
 public/js/app.js     UI controller.
+web/data-robinhood.js  Market data + per-player saves for the hosted web version.
+scripts/build-web.mjs  Bundles everything into one page for the web version.
 test/                Engine unit tests: `npm test`
 ```
 
