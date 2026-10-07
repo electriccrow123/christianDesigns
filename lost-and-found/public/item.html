@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Item — Lost & Found</title>
+  <meta name="description" content="Lost &amp; Found — second-hand finds, everything $20 or less.">
+  <!-- Fonts (Fraunces = logo/headings, Inter = body text). Change in css/style.css :root -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Shared code (menu, footer, cart, prices) — loads first on every page -->
+  <script src="js/common.js" defer></script>
+  <script src="js/item.js" defer></script>
+</head>
+<!-- =========================================================================
+     ITEM PAGE (item.html?id=...)
+     Shows one item: picture, price, details and "Add to cart".
+     Filled in by js/item.js using the id in the address bar.
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>
+
+  <main>
+    <p><a href="shop.html">← Back to shop</a></p>
+    <div id="item"><p class="muted">Loading…</p></div>
+  </main>
+
+  <footer id="site-footer"></footer>
+</body>
+</html>

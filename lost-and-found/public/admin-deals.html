@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">  <!-- keep admin pages out of Google -->
+  <title>Deals — Lost TITLEamp; Found Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/common.js" defer></script>
+  <script src="js/admin-auth.js" defer></script>
+  <script src="js/admin-deals.js" defer></script>
+</head>
+<!-- =========================================================================
+     DEALS PAGE (admin-deals.html): admin only.
+     Search other stores (Google Shopping via the price API in server.js) to
+     find cheap/sale items, either to stock the shop or to check that Lost &
+     Found's prices are fair. Results are sorted cheapest first; items on
+     sale at the other store are marked "SALE", and anything under $20 is
+     highlighted. Quick-search buttons and links to big stores' own deal
+     pages are at the top. Logic is in js/admin-deals.js.
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>
+
+  <main>
+    <!-- LOGIN BOX: hidden after the right password is entered -->
+    <section class="box" id="login" style="max-width:380px;margin:40px auto">
+      <h1>Admin login</h1>
+      <form>
+        <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+        <button class="btn" style="width:100%">Log in</button>
+      </form>
+      <div class="notice err hidden">Wrong password.</div>
+    </section>
+
+    <div id="admin-app" class="hidden">
+      <h1>Deals from other stores</h1>
+      <!-- ADMIN MENU: links between the admin pages -->
+      <nav class="admin-nav">
+        <a class="btn btn-small btn-outline" href="admin.html#items">Items &amp; prices</a>
+        <a class="btn btn-small btn-outline" href="admin.html#orders">Orders</a>
+        <a class="btn btn-small " href="admin-deals.html">Deals from other stores</a>
+        <button class="btn btn-small btn-outline" id="logout" type="button">Log out</button>
+      </nav>
+
+      <!-- API status message (shows if SERPAPI_KEY isn't set) -->
+      <div id="api-status"></div>
+
+      <!-- Store deal pages: edit this list to add/remove stores -->
+      <section class="box" style="margin-bottom:18px">
+        <h2>Store deal pages</h2>
+        <div class="store-links">
+          <a class="btn btn-small btn-outline" target="_blank" rel="noopener" href="https://www.amazon.com/deals">Amazon Today's Deals</a>
+          <a class="btn btn-small btn-outline" target="_blank" rel="noopener" href="https://www.walmart.com/shop/deals">Walmart Deals</a>
+          <a class="btn btn-small btn-outline" target="_blank" rel="noopener" href="https://www.target.com/c/top-deals/-/N-4xw74">Target Top Deals</a>
+          <a class="btn btn-small btn-outline" target="_blank" rel="noopener" href="https://www.ebay.com/deals">eBay Deals</a>
+          <a class="btn btn-small btn-outline" target="_blank" rel="noopener" href="https://www.bestbuy.com/site/misc/deal-of-the-day/pcmcat248000050016.c">Best Buy Deal of the Day</a>
+        </div>
+      </section>
+
+      <!-- Search -->
+      <form class="box" id="deal-form" style="margin-bottom:18px">
+        <div class="row" style="align-items:end">
+          <div style="grid-column: span 2"><label for="deal-q">Search other stores</label><input id="deal-q" required placeholder="e.g. throw pillow, phone charger, kids winter coat"></div>
+          <div><label for="deal-max">Show</label>
+            <select id="deal-max"><option value="20">Only $20 or less</option><option value="">Any price</option></select></div>
+          <button class="btn" type="submit">Search</button>
+        </div>
+        <!-- Quick searches for each product type: edit the words in admin-deals.js -->
+        <div class="store-links" id="quick-searches"></div>
+      </form>
+
+      <div id="deal-results"></div>
+    </div>
+  </main>
+
+  <footer id="site-footer"></footer>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "_help": "Copy this block into data/products.json (inside the [ ] list) to add an item by hand. Delete this _help line. Easier: use the Admin page, which fills all of this in for you.",
+  "id": "itm_unique01",
+  "name": "Item name shown on the site",
+  "price": 10.00,
+  "category": "Decor | Tech | Clothes | Toys | Other",
+  "season": "Only for Clothes: Spring | Summer | Fall | Winter | All Season  (leave \"\" for others)",
+  "description": "A sentence or two about the item.",
+  "condition": "New | Like New | Good | Fair",
+  "quantity": 1,
+  "featured": false,
+  "image": "uploads/my-photo.jpg  (or \"\" for no picture)",
+  "createdAt": "2026-10-07T12:00:00.000Z"
+}

@@ -1,0 +1,7 @@
+# Orders hold customer names/emails — never commit them.
+data/orders.json
+# Pictures uploaded through the admin page live on the server, not in git.
+public/uploads/*
+!public/uploads/.gitkeep
+node_modules/
+*.tmp

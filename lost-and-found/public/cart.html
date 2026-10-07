@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cart — Lost & Found</title>
+  <meta name="description" content="Lost &amp; Found — second-hand finds, everything $20 or less.">
+  <!-- Fonts (Fraunces = logo/headings, Inter = body text). Change in css/style.css :root -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Shared code (menu, footer, cart, prices) — loads first on every page -->
+  <script src="js/common.js" defer></script>
+  <script src="js/cart.js" defer></script>
+</head>
+<!-- =========================================================================
+     CART & CHECKOUT (cart.html)
+     Left: items in the cart (change quantity / remove).
+     Right: checkout form. Placing an order saves it to data/orders.json and
+     the admin sees it on the Admin > Orders tab, then contacts the buyer to
+     arrange payment & pickup/shipping. (Online card payment can be added
+     later, e.g. Stripe or PayPal; see README.md.)
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>
+
+  <main>
+    <h1>Your cart</h1>
+    <div class="cart-layout">
+      <section id="cart-lines"></section>
+
+      <section class="box" id="checkout-box">
+        <h2>Checkout</h2>
+        <div class="total-row"><span>Total</span><span id="cart-total">$0.00</span></div>
+        <form id="checkout">
+          <div class="field"><label for="c-name">Your name</label><input id="c-name" required autocomplete="name"></div>
+          <div class="field"><label for="c-email">Email</label><input id="c-email" type="email" required autocomplete="email"></div>
+          <div class="field"><label for="c-phone">Phone (optional)</label><input id="c-phone" type="tel" autocomplete="tel"></div>
+          <div class="field"><label for="c-notes">Notes (pickup time, shipping address…)</label><textarea id="c-notes"></textarea></div>
+          <button class="btn" type="submit" style="width:100%">Place order</button>
+          <p class="muted" style="font-size:.85rem">We'll email you to arrange payment and pickup or shipping.
+            By ordering you agree to our <a href="legal.html">terms</a>.</p>
+        </form>
+        <div id="checkout-msg"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer id="site-footer"></footer>
+</body>
+</html>

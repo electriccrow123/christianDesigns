@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shop — Lost & Found</title>
+  <meta name="description" content="Lost &amp; Found — second-hand finds, everything $20 or less.">
+  <!-- Fonts (Fraunces = logo/headings, Inter = body text). Change in css/style.css :root -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Shared code (menu, footer, cart, prices) — loads first on every page -->
+  <script src="js/common.js" defer></script>
+  <script src="js/shop.js" defer></script>
+</head>
+<!-- =========================================================================
+     SHOP PAGE (shop.html)
+     The "browse bar" lets shoppers browse BY PRODUCT (search + type + season),
+     BY COST (max price / sort cheapest) and BY DATE ADDED (sort newest/oldest).
+     Links can pre-set filters, e.g. shop.html?category=Clothes&season=Winter
+     Logic lives in js/shop.js.
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>
+
+  <main>
+    <h1 id="shop-title">Shop all</h1>
+
+    <!-- BROWSE BAR -->
+    <form class="browse-bar" id="browse" onsubmit="return false">
+      <div class="search">
+        <label for="q">Search products</label>
+        <input id="q" type="search" placeholder="e.g. lamp, jacket, headphones">
+      </div>
+      <div>
+        <label for="category">Product type</label>
+        <select id="category"><option value="">All types</option></select>
+      </div>
+      <div>
+        <!-- Only shown when "Clothes" is picked -->
+        <label for="season">Season</label>
+        <select id="season"><option value="">All seasons</option></select>
+      </div>
+      <div>
+        <label for="max">Max cost</label>
+        <select id="max">
+          <option value="">Any ($20 or less)</option>
+          <option value="5">Under $5</option>
+          <option value="10">Under $10</option>
+          <option value="15">Under $15</option>
+        </select>
+      </div>
+      <div>
+        <label for="sort">Sort by</label>
+        <select id="sort">
+          <option value="newest">Date added: newest</option>
+          <option value="oldest">Date added: oldest</option>
+          <option value="price-asc">Cost: low to high</option>
+          <option value="price-desc">Cost: high to low</option>
+          <option value="name">Product name A–Z</option>
+        </select>
+      </div>
+    </form>
+
+    <p class="muted" id="result-count"></p>
+    <div class="grid" id="results"></div>
+  </main>
+
+  <footer id="site-footer"></footer>
+</body>
+</html>

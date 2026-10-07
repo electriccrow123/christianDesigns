@@ -1,0 +1,69 @@
+[
+  {
+    "id": "itm_sample01",
+    "name": "Vintage Brass Candle Holder",
+    "price": 12,
+    "category": "Decor",
+    "season": "",
+    "description": "Solid brass candle holder with a warm patina. Fits standard taper candles.",
+    "condition": "Good",
+    "quantity": 1,
+    "featured": true,
+    "image": "images/sample-decor.svg",
+    "createdAt": "2026-10-01T15:00:00.000Z"
+  },
+  {
+    "id": "itm_sample02",
+    "name": "Wireless Earbuds (Charging Case)",
+    "price": 18.5,
+    "wasPrice": 20,
+    "priceHistory": [{ "from": 20, "to": 18.5, "at": "2026-10-04T12:00:00.000Z" }],
+    "category": "Tech",
+    "season": "",
+    "description": "Bluetooth earbuds with charging case. Tested and working. Ear tips cleaned.",
+    "condition": "Like New",
+    "quantity": 2,
+    "featured": true,
+    "image": "images/sample-tech.svg",
+    "createdAt": "2026-10-03T15:00:00.000Z"
+  },
+  {
+    "id": "itm_sample03",
+    "name": "Wool Knit Beanie",
+    "price": 6,
+    "category": "Clothes",
+    "season": "Winter",
+    "description": "Thick knit beanie, one size fits most. Charcoal grey.",
+    "condition": "Like New",
+    "quantity": 3,
+    "featured": false,
+    "image": "images/sample-clothes.svg",
+    "createdAt": "2026-10-05T15:00:00.000Z"
+  },
+  {
+    "id": "itm_sample04",
+    "name": "Linen Summer Shirt (M)",
+    "price": 9.75,
+    "category": "Clothes",
+    "season": "Summer",
+    "description": "Light, breathable linen button-up. Men's medium.",
+    "condition": "Good",
+    "quantity": 1,
+    "featured": false,
+    "image": "images/sample-clothes.svg",
+    "createdAt": "2026-09-28T15:00:00.000Z"
+  },
+  {
+    "id": "itm_sample05",
+    "name": "Wooden Building Blocks (40 pc)",
+    "price": 14,
+    "category": "Toys",
+    "season": "",
+    "description": "Classic natural wood blocks in a cloth bag. All 40 pieces included.",
+    "condition": "Good",
+    "quantity": 1,
+    "featured": true,
+    "image": "images/sample-toys.svg",
+    "createdAt": "2026-10-06T15:00:00.000Z"
+  }
+]

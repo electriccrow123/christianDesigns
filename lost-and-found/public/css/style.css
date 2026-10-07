@@ -1,0 +1,180 @@
+/* =============================================================================
+   LOST AND FOUND — site styles (used by every page)
+   -----------------------------------------------------------------------------
+   HOW TO EDIT:
+     • Colors & fonts  -> change the variables in :root (section 1). Every page
+                          uses these, so one change updates the whole site.
+     • Header / menu   -> section 3      • Item cards (shop grid) -> section 6
+     • Buttons / forms -> section 4      • Admin pages            -> section 9
+   ============================================================================= */
+
+/* ---------- 1. THEME: colors, fonts, sizes ---------- */
+:root {
+  --paper: #f7f3ec;        /* page background (warm "paper" color) */
+  --card: #ffffff;         /* background of cards/boxes */
+  --ink: #2b2622;          /* main text color */
+  --muted: #6f665d;        /* secondary/grey text */
+  --line: #e2d9cc;         /* borders and dividers */
+  --accent: #b5532f;       /* brand color: buttons, links, prices */
+  --accent-dark: #8f3f22;  /* button hover color */
+  --tag: #efe6d8;          /* category/season pill background */
+  --good: #2f7a4b;         /* success messages, "deal" highlights */
+  --bad: #b23a3a;          /* error messages, delete buttons */
+
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-brand: "Fraunces", Georgia, serif; /* used for the logo and headings */
+  --radius: 10px;
+  --max-width: 1150px;     /* widest the page content gets */
+}
+
+/* ---------- 2. BASE: page defaults ---------- */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.55 var(--font-body);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+main { flex: 1; width: 100%; max-width: var(--max-width); margin: 0 auto; padding: 24px 16px 56px; }
+h1, h2, h3 { font-family: var(--font-brand); line-height: 1.2; margin: 0 0 .5em; }
+h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); }
+h2 { font-size: 1.5rem; }
+a { color: var(--accent); }
+img { max-width: 100%; display: block; }
+.muted { color: var(--muted); }
+.hidden { display: none !important; }
+
+/* ---------- 3. HEADER & MENU (built by js/common.js) ---------- */
+.site-header { background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
+.header-inner {
+  max-width: var(--max-width); margin: 0 auto; padding: 12px 16px;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+}
+.logo { font-family: var(--font-brand); font-size: 1.6rem; font-weight: 700; color: var(--ink); text-decoration: none; }
+.logo span { color: var(--accent); }               /* the "&" in the logo */
+.main-nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+.main-nav a {
+  color: var(--ink); text-decoration: none; padding: 6px 10px; border-radius: 6px; font-size: .95rem;
+}
+.main-nav a:hover, .main-nav a.active { background: var(--tag); }
+.cart-link { font-weight: 600; color: var(--ink); text-decoration: none; white-space: nowrap; }
+.cart-count {
+  display: inline-block; min-width: 22px; padding: 0 6px; margin-left: 4px; border-radius: 11px;
+  background: var(--accent); color: #fff; font-size: .8rem; text-align: center;
+}
+.price-banner { background: var(--ink); color: var(--paper); text-align: center; font-size: .85rem; padding: 6px 16px; }
+
+/* ---------- 4. BUTTONS, FORMS, MESSAGES ---------- */
+.btn {
+  display: inline-block; border: 0; border-radius: var(--radius); cursor: pointer;
+  background: var(--accent); color: #fff; padding: 10px 18px; font: 600 .95rem var(--font-body);
+  text-decoration: none; text-align: center;
+}
+.btn:hover { background: var(--accent-dark); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-outline { background: transparent; color: var(--accent); border: 1.5px solid var(--accent); }
+.btn-outline:hover { background: var(--tag); }
+.btn-small { padding: 5px 10px; font-size: .85rem; }
+.btn-danger { background: var(--bad); }
+
+label { display: block; font-weight: 600; font-size: .9rem; margin-bottom: 4px; }
+input, select, textarea {
+  width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  font: inherit; background: #fff; color: var(--ink);
+}
+textarea { min-height: 90px; resize: vertical; }
+.field { margin-bottom: 14px; }
+.row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.check input { width: auto; }
+
+.notice { padding: 10px 14px; border-radius: 8px; margin: 12px 0; }
+.notice.ok { background: #e3f1e7; color: var(--good); }
+.notice.err { background: #f6e1e1; color: var(--bad); }
+
+/* ---------- 5. HOME PAGE ---------- */
+.hero {
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: clamp(24px, 5vw, 56px); margin-bottom: 32px; text-align: center;
+}
+.hero p { font-size: 1.15rem; color: var(--muted); max-width: 560px; margin: 0 auto 20px; }
+.type-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 36px; }
+.type-tile {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 20px 12px; text-align: center; text-decoration: none; color: var(--ink); font-weight: 600;
+}
+.type-tile:hover { border-color: var(--accent); }
+.type-tile .emoji { font-size: 2rem; display: block; margin-bottom: 6px; }
+.section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+
+/* ---------- 6. ITEM CARDS (grid of products) ---------- */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 18px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column; text-decoration: none; color: var(--ink);
+}
+.card:hover { box-shadow: 0 6px 18px rgba(43, 38, 34, .1); }
+.card img { aspect-ratio: 1 / 1; object-fit: cover; width: 100%; background: var(--tag); }
+.card-body { padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.card-title { font-weight: 600; }
+.price { color: var(--accent); font-weight: 700; font-size: 1.1rem; }
+.was { color: var(--muted); text-decoration: line-through; font-weight: 400; font-size: .9rem; margin-left: 6px; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 6px; }
+.tag { background: var(--tag); border-radius: 20px; padding: 2px 10px; font-size: .78rem; color: var(--muted); }
+.sold-out { color: var(--bad); font-weight: 600; font-size: .85rem; }
+.empty { text-align: center; padding: 40px 0; color: var(--muted); }
+
+/* ---------- 7. SHOP PAGE: browse bar (product / cost / date added) ---------- */
+.browse-bar {
+  display: grid; grid-template-columns: 2fr repeat(4, 1fr); gap: 10px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px; margin-bottom: 20px;
+}
+.browse-bar label { font-size: .8rem; color: var(--muted); }
+@media (max-width: 760px) { .browse-bar { grid-template-columns: 1fr 1fr; } .browse-bar .search { grid-column: 1 / -1; } }
+
+/* ---------- 8. ITEM PAGE & CART ---------- */
+.item-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+.item-layout img { border-radius: var(--radius); border: 1px solid var(--line); width: 100%; aspect-ratio: 1/1; object-fit: cover; background: var(--tag); }
+.item-layout .price { font-size: 1.8rem; }
+@media (max-width: 760px) { .item-layout { grid-template-columns: 1fr; } }
+
+.cart-layout { display: grid; grid-template-columns: 1.4fr 1fr; gap: 28px; align-items: start; }
+@media (max-width: 860px) { .cart-layout { grid-template-columns: 1fr; } }
+.cart-line { display: grid; grid-template-columns: 70px 1fr auto; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.cart-line img { width: 70px; height: 70px; object-fit: cover; border-radius: 8px; }
+.qty { width: 64px; }
+.box { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+.total-row { display: flex; justify-content: space-between; font-weight: 700; font-size: 1.15rem; margin: 12px 0; }
+
+/* ---------- 9. ADMIN PAGES ---------- */
+.admin-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.admin-grid { display: grid; grid-template-columns: 380px 1fr; gap: 24px; align-items: start; }
+@media (max-width: 960px) { .admin-grid { grid-template-columns: 1fr; } }
+.table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+th { background: var(--tag); font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+td img { width: 48px; min-width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
+td .price-input { width: 84px; padding: 5px 7px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.preview { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); margin-top: 8px; }
+.compare-row { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.compare-row img { width: 56px; height: 56px; object-fit: contain; background: #fff; border-radius: 6px; }
+.deal { color: var(--good); font-weight: 700; }
+.store-links { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+dialog { border: 0; border-radius: 14px; padding: 22px; width: min(640px, calc(100vw - 32px)); max-height: 85vh; }
+dialog::backdrop { background: rgba(0, 0, 0, .4); }
+
+/* ---------- 10. FOOTER (built by js/common.js) ---------- */
+.site-footer { background: var(--ink); color: #d9d1c5; font-size: .9rem; }
+.footer-inner { max-width: var(--max-width); margin: 0 auto; padding: 24px 16px; display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; }
+.site-footer a { color: #fff; }
+
+/* ---------- 11. LEGAL PAGE ---------- */
+.legal { max-width: 760px; }
+.legal h2 { margin-top: 1.6em; font-size: 1.25rem; }

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lost & Found — Everything $20 or Less</title>
+  <meta name="description" content="Lost &amp; Found — second-hand finds, everything $20 or less.">
+  <!-- Fonts (Fraunces = logo/headings, Inter = body text). Change in css/style.css :root -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Shared code (menu, footer, cart, prices) — loads first on every page -->
+  <script src="js/common.js" defer></script>
+  <script src="js/home.js" defer></script>
+</head>
+<!-- =========================================================================
+     HOME PAGE (index.html)
+     Sections: 1) welcome banner  2) product-type tiles  3) featured items
+               4) newest arrivals
+     The items are filled in by js/home.js from data/products.json.
+     To feature an item on this page, tick "Featured" on the Admin page.
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>   <!-- menu: built by js/common.js -->
+
+  <main>
+    <!-- 1) WELCOME BANNER: edit the heading/text freely -->
+    <section class="hero">
+      <h1>Lost &amp; Found</h1>
+      <p>Pre-loved decor, tech, clothes and toys, and every single item is $20 or less.</p>
+      <a class="btn" href="shop.html">Browse everything</a>
+    </section>
+
+    <!-- 2) PRODUCT TYPES: one tile per category (filled in by home.js) -->
+    <h2>Shop by type</h2>
+    <div class="type-tiles" id="type-tiles"></div>
+
+    <!-- 3) FEATURED ITEMS -->
+    <section id="featured-section">
+      <div class="section-head"><h2>Featured finds</h2><a href="shop.html">See all →</a></div>
+      <div class="grid" id="featured"></div>
+    </section>
+
+    <!-- 4) NEWEST ARRIVALS (sorted by date added) -->
+    <section style="margin-top:36px">
+      <div class="section-head"><h2>Just added</h2><a href="shop.html?sort=newest">See newest →</a></div>
+      <div class="grid" id="newest"></div>
+    </section>
+  </main>
+
+  <footer id="site-footer"></footer>   <!-- footer: built by js/common.js -->
+</body>
+</html>

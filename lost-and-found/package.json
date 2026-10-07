@@ -1,0 +1,14 @@
+{
+  "name": "lost-and-found",
+  "version": "1.0.0",
+  "description": "Lost & Found: an online shop where everything is $20 or less, with an admin side for items, price changes and price comparison.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

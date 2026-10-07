@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">  <!-- keep admin pages out of Google -->
+  <title>Admin — Lost TITLEamp; Found</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/common.js" defer></script>
+  <script src="js/admin-auth.js" defer></script>
+  <script src="js/admin.js" defer></script>
+</head>
+<!-- =========================================================================
+     ADMIN PAGE (admin.html): the shop owner's control panel.
+       • ADD / EDIT ITEMS  -> form on the left (name, price, type, season,
+                              picture...). Saved to data/products.json; the
+                              picture is saved in public/uploads/.
+       • PRICE CHANGES     -> type a new price right in the table, or use
+                              "Bulk price change" (e.g. -25% on Winter clothes).
+       • COMPARE PRICES    -> "Compare" button on each row checks what other
+                              stores charge for that item (price API).
+       • IMPORT FROM CSV   -> add many items at once from a spreadsheet
+                              (format: data/products-import-template.csv).
+       • ORDERS            -> see what shoppers ordered and mark them paid/done.
+     All logic is in js/admin.js. Password is set by ADMIN_PASSWORD (server.js).
+     ========================================================================= -->
+<body>
+  <header id="site-header"></header>
+
+  <main>
+    <!-- LOGIN BOX: hidden after the right password is entered -->
+    <section class="box" id="login" style="max-width:380px;margin:40px auto">
+      <h1>Admin login</h1>
+      <form>
+        <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+        <button class="btn" style="width:100%">Log in</button>
+      </form>
+      <div class="notice err hidden">Wrong password.</div>
+    </section>
+
+    <div id="admin-app" class="hidden">
+      <h1>Admin</h1>
+      <!-- ADMIN MENU: links between the admin pages -->
+      <nav class="admin-nav">
+        <a class="btn btn-small " href="admin.html#items">Items &amp; prices</a>
+        <a class="btn btn-small btn-outline" href="admin.html#orders">Orders</a>
+        <a class="btn btn-small btn-outline" href="admin-deals.html">Deals from other stores</a>
+        <button class="btn btn-small btn-outline" id="logout" type="button">Log out</button>
+      </nav>
+
+      <!-- ================= ITEMS TAB ================= -->
+      <section id="tab-items">
+        <div class="admin-grid">
+          <!-- ---- LEFT: add / edit item form ---- -->
+          <div>
+            <form class="box" id="item-form">
+              <h2 id="form-title">Add an item</h2>
+              <input type="hidden" id="f-id">
+              <div class="field"><label for="f-name">Item name</label><input id="f-name" required maxlength="100"></div>
+              <div class="row">
+                <div class="field"><label for="f-price">Price ($20 max)</label><input id="f-price" type="number" step="0.01" min="0.01" max="20" required></div>
+                <div class="field"><label for="f-qty">Quantity</label><input id="f-qty" type="number" min="0" value="1" required></div>
+              </div>
+              <div class="row">
+                <div class="field"><label for="f-category">Product type</label><select id="f-category"></select></div>
+                <div class="field" id="season-field"><label for="f-season">Season</label><select id="f-season"></select></div>
+              </div>
+              <div class="field">
+                <label for="f-condition">Condition</label>
+                <select id="f-condition"><option>New</option><option>Like New</option><option selected>Good</option><option>Fair</option></select>
+              </div>
+              <div class="field"><label for="f-desc">Description</label><textarea id="f-desc" maxlength="2000"></textarea></div>
+              <div class="field">
+                <label for="f-image">Picture (JPG, PNG, WEBP, GIF)</label>
+                <input id="f-image" type="file" accept="image/jpeg,image/png,image/webp,image/gif">
+                <img id="f-preview" class="preview hidden" alt="Picture preview">
+                <label class="check hidden" id="remove-image-wrap"><input type="checkbox" id="f-remove-image"> Remove current picture</label>
+              </div>
+              <label class="check field"><input type="checkbox" id="f-featured"> Featured on the home page</label>
+              <div class="actions">
+                <button class="btn" type="submit" id="save-btn">Add item</button>
+                <button class="btn btn-outline hidden" type="button" id="cancel-edit">Cancel edit</button>
+              </div>
+              <div id="form-msg"></div>
+            </form>
+
+            <!-- ---- Bulk price change ---- -->
+            <form class="box" id="bulk-form" style="margin-top:18px">
+              <h2>Bulk price change</h2>
+              <p class="muted" style="font-size:.9rem">Raise or lower many prices at once. Use a minus sign for a sale (e.g. -25).
+                Prices round to the nearest $0.25 and never go over $20.</p>
+              <div class="row">
+                <div class="field"><label for="b-percent">Change %</label><input id="b-percent" type="number" step="1" min="-99" max="100" required placeholder="-25"></div>
+                <div class="field"><label for="b-category">Product type</label><select id="b-category"><option value="all">All types</option></select></div>
+                <div class="field"><label for="b-season">Season</label><select id="b-season"><option value="">Any</option></select></div>
+              </div>
+              <button class="btn" type="submit">Apply price change</button>
+              <div id="bulk-msg"></div>
+            </form>
+
+            <!-- ---- CSV import ---- -->
+            <form class="box" id="csv-form" style="margin-top:18px">
+              <h2>Import items from CSV</h2>
+              <p class="muted" style="font-size:.9rem">Add many items from a spreadsheet saved as CSV. Columns:
+                name, price, category, season, condition, quantity, featured, description.
+                <a href="templates/products-import-template.csv" download>Download the template</a>.
+                Add pictures afterwards with Edit.</p>
+              <div class="field"><input id="csv-file" type="file" accept=".csv,text/csv" required></div>
+              <button class="btn" type="submit">Import</button>
+              <div id="csv-msg"></div>
+            </form>
+          </div>
+
+          <!-- ---- RIGHT: all items table ---- -->
+          <div>
+            <div class="section-head">
+              <h2>All items <span class="muted" id="item-count"></span></h2>
+              <div class="actions">
+                <input id="table-search" type="search" placeholder="Filter items…" style="width:200px">
+                <button class="btn btn-small btn-outline" id="export-json" type="button">Download backup (JSON)</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th></th><th>Item</th><th>Type</th><th>Price</th><th>Qty</th><th>Added</th><th></th></tr></thead>
+                <tbody id="item-rows"></tbody>
+              </table>
+            </div>
+            <p class="muted" style="font-size:.85rem">Tip: change a price in the table and press Enter to save it. Price drops show a crossed-out "was" price in the shop.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= ORDERS TAB ================= -->
+      <section id="tab-orders" class="hidden">
+        <h2>Orders</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th></tr></thead>
+            <tbody id="order-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================= COMPARE PRICES POP-UP ================= -->
+    <dialog id="compare-dialog">
+      <div class="section-head"><h2 id="compare-title">Compare prices</h2><button class="btn btn-small btn-outline" id="compare-close" type="button">Close</button></div>
+      <div id="compare-body"></div>
+    </dialog>
+  </main>
+
+  <footer id="site-footer"></footer>
+</body>
+</html>
