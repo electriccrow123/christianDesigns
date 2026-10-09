@@ -4,6 +4,8 @@ Practice trading **stocks and option contracts** with fake money at **real, curr
 A built-in coach gives tips and trading strategies, explains how and where to place each trade, and
 tracks your profit/loss, balance and progress. You can reset the account at any time.
 
+> This repo also contains **[Game Modder AI](game-modder/README.md)**, a local, offline AI assistant for modding PC games you own.
+
 ## Quick start
 
 Requires [Node.js](https://nodejs.org) 18 or newer. No `npm install` is needed because there are zero dependencies.

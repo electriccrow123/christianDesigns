@@ -3,3 +3,5 @@ node_modules/
 *.log
 *.png
 dist/
+__pycache__/
+*.pyc
