@@ -1,0 +1,19 @@
+{
+  "name": "crowsnest",
+  "version": "1.0.0",
+  "description": "Crow's Nest: a four-agent Claude trading desk for an agentic Robinhood account, with five risk modes, a code-enforced risk gate, a week/day/hour planner, pattern research and a training academy.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build-hosted.mjs",
+    "autopilot": "node bin/autopilot.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.130.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

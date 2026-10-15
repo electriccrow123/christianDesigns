@@ -1,5 +1,9 @@
 # 📈 TradeTrainer: Stock & Options Paper-Trading Game
 
+> **New: [Crow's Nest](crowsnest/README.md)**, a four-agent Claude trading desk for an agentic Robinhood account
+> (live or paper), with five risk modes, a code-enforced risk gate, a week/day/hour planner, pattern research and a
+> training academy. It lives in `crowsnest/`.
+
 Practice trading **stocks and option contracts** with fake money at **real, current market prices**.
 A built-in coach gives tips and trading strategies, explains how and where to place each trade, and
 tracks your profit/loss, balance and progress. You can reset the account at any time.
