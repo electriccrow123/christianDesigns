@@ -13,7 +13,7 @@ import { marketStatus, todayNY, addDays, daysBetween, weekDays } from './market-
 import { analyze, brief } from './patterns.js';
 import { marketRegime, INDEX_ETFS, FEAR_GAUGE } from './regime.js';
 import { resolveParams, modeRules, adjustableSpec, modeById, modeByLevel, DEFAULT_LIMITS } from './modes.js';
-import { evaluate, normalizeTicket, exitSignals, exposure, countDayTrades, inferStrategy } from './risk.js';
+import { evaluate, normalizeTicket, exitSignals, adoptionPlans, exposure, countDayTrades, inferStrategy } from './risk.js';
 import { enrichContract, rankContracts, expectedMove, contractLabel, MULTIPLIER, STRATEGIES } from './options.js';
 import { AGENTS, scoutPrompt, analystPrompt, honchoPrompt, operatorPrompt, chatRules, explainPrompt, deepDivePrompt } from './agents.js';
 import { weekEvents, emptyWeekPlan, emptyDayPlan } from './planner.js';
@@ -492,6 +492,12 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         .sort((a, b) => Math.abs(b.score) + (held.includes(b.symbol) ? 40 : 0) + (focus.includes(b.symbol) ? 25 : 0) - (Math.abs(a.score) + (held.includes(a.symbol) ? 40 : 0) + (focus.includes(a.symbol) ? 25 : 0)));
       say('system', 'Data gathered', `${universe.length} symbols analyzed. Market regime: ${regime.label} (${regime.score > 0 ? '+' : ''}${regime.score}), volatility ${regime.volatility}. Account ${money(snap.portfolio.equity)} with ${money(snap.portfolio.buyingPower)} buying power. Mode: ${params.mode.name}.`);
 
+      // Positions without an exit plan are adopted from today's price before exits are checked.
+      const adopted = adoptionPlans({ positions: snap, plans: await getExits(), quotes, params });
+      if (Object.keys(adopted).length) {
+        await store.set(P.exits, { plans: { ...(await getExits()), ...adopted } });
+        say('system', 'Adopted positions', Object.entries(adopted).map(([k, p]) => `${snap.options.find((o) => o.id === k) ? contractLabel(snap.options.find((o) => o.id === k)) : k}: stop ${p.stop}, target ${p.target}`).join('\n'));
+      }
       // Deterministic exits first (they run whatever the agents say)
       const exitPlans = await getExits();
       const sameExit = (i, e) => i.source === 'exit' && i.symbol === e.ticket.symbol && (i.ticket?.legs?.[0]?.contractId || null) === (e.ticket.legs?.[0]?.contractId || null);
@@ -898,9 +904,14 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const state = await getState();
     const snap = given || (await snapshot({ force: true }));
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
-    const plans = await getExits();
+    let plans = await getExits();
     const syms = snap.stocks.map((s) => s.symbol);
     const quotes = Object.fromEntries((await market.quotes(syms).catch(() => [])).map((q) => [q.symbol, q]));
+    const adopted = adoptionPlans({ positions: snap, plans, quotes, params });
+    if (Object.keys(adopted).length) {
+      plans = { ...plans, ...adopted };
+      await store.set(P.exits, { plans });
+    }
     const exits = exitSignals({ positions: snap, plans, quotes, params, todayIso: todayNY(now()), clock: marketStatus(now()) });
     const existing = (await listIntents({ limit: 60 })).filter((i) => i.source === 'exit' && ACTIVE_INTENT.has(i.status));
     const out = [];

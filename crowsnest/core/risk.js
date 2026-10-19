@@ -407,7 +407,6 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
     let reason = null;
     if (plan?.stop && px <= plan.stop) reason = `price $${round(px, 2)} hit the $${plan.stop} stop`;
     else if (plan?.target && px >= plan.target) reason = `price $${round(px, 2)} reached the $${plan.target} target`;
-    else if (!plan && s.avgCost && changePct <= -params.stopLossPct * 1.5) reason = `down ${round(-changePct, 1)}% with no exit plan (mode stop is ${params.stopLossPct}%)`;
     else if (plan?.timeStop && todayIso >= plan.timeStop) reason = `time stop ${plan.timeStop} reached`;
     if (reason) {
       const whole = Number.isInteger(qtyAvail);
@@ -436,8 +435,6 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
     let reason = null;
     if (plan?.stop != null && (long ? mark <= plan.stop : mark >= plan.stop)) reason = `option at $${round(mark, 2)} hit its $${plan.stop} stop`;
     else if (plan?.target != null && (long ? mark >= plan.target : mark <= plan.target)) reason = `option at $${round(mark, 2)} reached its $${plan.target} target`;
-    else if (!plan && entry && pnlPct <= -params.optionStopPct) reason = `down ${round(-pnlPct, 0)}% on premium (mode stop ${params.optionStopPct}%)`;
-    else if (!plan && entry && pnlPct >= params.optionTakeProfitPct) reason = `up ${round(pnlPct, 0)}% on premium (mode target ${params.optionTakeProfitPct}%)`;
     const days = o.expiration && todayIso ? daysBetween(todayIso, o.expiration) : null;
     if (!reason && days === 0 && !params.allowZeroDte) reason = 'expires today; closing to avoid assignment or a worthless expiry';
     if (!reason && days === 0 && clock?.minutesToClose != null && clock.minutesToClose <= 20) reason = 'expires in the last 20 minutes of the session';
@@ -458,6 +455,37 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
         }),
       });
     }
+  }
+  return out;
+}
+
+/**
+ * Exit plans for positions that have none (bought by hand, before the desk started, or a plan was
+ * lost). The desk adopts them from the current price instead of judging them against an old cost
+ * basis, so it never dumps a position the moment it first sees it.
+ * @returns {{[key: string]: object}} new plans keyed like exitSignals' plans
+ */
+export function adoptionPlans({ positions, plans = {}, quotes = {}, params }) {
+  const out = {};
+  for (const s of positions?.stocks || []) {
+    if (plans[s.symbol]) continue;
+    const px = quotes[s.symbol]?.price ?? s.price;
+    if (!(px > 0)) continue;
+    out[s.symbol] = { stop: tickRound(px * (1 - params.stopLossPct / 100), { direction: 'down' }), target: tickRound(px * (1 + params.takeProfitPct / 100), { direction: 'up' }), timeStop: null, basis: 'stock_price', adopted: true, note: `Adopted at $${round(px, 2)}: ${params.stopLossPct}% stop, ${params.takeProfitPct}% target from the ${params.mode.name} mode.` };
+  }
+  for (const o of positions?.options || []) {
+    if (plans[o.id] || !(o.mark > 0) || !o.qty) continue;
+    const long = o.qty > 0;
+    const stopPct = params.optionStopPct || 50;
+    const tgtPct = params.optionTakeProfitPct || 100;
+    out[o.id] = {
+      stop: tickRound(long ? o.mark * (1 - stopPct / 100) : o.mark * (1 + stopPct / 100), { option: true }),
+      target: tickRound(long ? o.mark * (1 + tgtPct / 100) : o.mark * (1 - Math.min(90, tgtPct) / 100), { option: true }),
+      timeStop: null,
+      basis: 'option_premium',
+      adopted: true,
+      note: `Adopted at $${round(o.mark, 2)} premium from the ${params.mode.name} mode.`,
+    };
   }
   return out;
 }

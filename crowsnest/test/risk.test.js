@@ -134,3 +134,14 @@ test('day trades are counted from same-day round trips', () => {
   assert.equal(r.count, 1);
   assert.deepEqual(r.openedToday.sort(), ['AAPL', 'MSFT']);
 });
+
+test('positions without a plan are adopted from today’s price, not sold', async () => {
+  const { adoptionPlans } = await import('../core/risk.js');
+  const params = resolveParams('balanced');
+  const positions = { stocks: [{ symbol: 'COIN', qty: 0.025, available: 0.025, avgCost: 198, price: 166 }], options: [{ id: 'o9', symbol: 'SPY', right: 'call', strike: 600, expiration: '2026-12-18', qty: 1, avgPrice: 4, mark: 2 }] };
+  assert.equal(exitSignals({ positions, plans: {}, quotes: {}, params, todayIso: '2026-10-19' }).length, 0);
+  const plans = adoptionPlans({ positions, plans: {}, quotes: {}, params });
+  assert.ok(Math.abs(plans.COIN.stop - 166 * 0.92) < 0.02 && plans.COIN.adopted);
+  assert.equal(plans.o9.stop, 1.2);
+  assert.equal(adoptionPlans({ positions, plans, quotes: {}, params }).COIN, undefined);
+});
