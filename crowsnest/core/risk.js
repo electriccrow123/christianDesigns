@@ -270,6 +270,10 @@ export function evaluate(ticketIn, ctx) {
         t.quantity = round(avail, 6);
         warn('position', 'Shares to sell', `Reduced to the ${avail} shares available to sell.`);
       }
+      if (t.quantity && !Number.isInteger(t.quantity) && t.orderType !== 'market') {
+        t.orderType = 'market'; // fractional shares only trade as market orders
+        t.limitPrice = null;
+      }
     }
   }
 
@@ -281,9 +285,10 @@ export function evaluate(ticketIn, ctx) {
     let cap = (equity * capPct) / 100;
     const reasons = [`${capPct}% of account = $${round(cap, 2)}`];
     // Adding to a holding counts what is already held toward the same per-position cap.
-    const heldValue = isOpt
-      ? (ctx.positions?.options || []).filter((o) => o.symbol === t.symbol && o.qty > 0).reduce((a, o) => a + Math.abs(o.value || 0), 0)
-      : Math.abs(ctx.positions?.stocks?.find((s) => s.symbol === t.symbol)?.value || 0);
+    const heldValue =
+      (isOpt
+        ? (ctx.positions?.options || []).filter((o) => o.symbol === t.symbol && o.qty > 0).reduce((a, o) => a + Math.abs(o.value || 0), 0)
+        : Math.abs(ctx.positions?.stocks?.find((s) => s.symbol === t.symbol)?.value || 0)) + (ctx.pending?.[t.symbol] || 0); // plus orders approved earlier this cycle
     if (heldValue > 0) {
       cap = Math.max(0, cap - heldValue);
       reasons.push(`$${round(heldValue, 2)} of ${t.symbol} already held leaves $${round(cap, 2)}`);
@@ -318,13 +323,16 @@ export function evaluate(ticketIn, ctx) {
         cost = orderCost(t, quote);
       } else block('size', 'Position size', `Needs $${round(cost, 2)} but the limit is $${round(cap, 2)} (${reasons.join('; ')}). Too small to buy even one ${isOpt ? 'contract' : 'share'}.`);
     } else pass('size', 'Position size', `$${round(cost, 2)} within $${round(cap, 2)}.`);
-    const openCount = (ctx.positions?.stocks?.length || 0) + new Set((ctx.positions?.options || []).map((o) => o.symbol)).size;
-    const already = ctx.positions?.stocks?.some((s) => s.symbol === t.symbol) || ctx.positions?.options?.some((o) => o.symbol === t.symbol);
+    const heldSyms = new Set([...(ctx.positions?.stocks || []).map((s) => s.symbol), ...(ctx.positions?.options || []).map((o) => o.symbol)]);
+    const openCount = (ctx.positions?.stocks?.length || 0) + new Set((ctx.positions?.options || []).map((o) => o.symbol)).size + Object.keys(ctx.pending || {}).filter((s) => !heldSyms.has(s)).length;
+    const already = heldSyms.has(t.symbol) || !!ctx.pending?.[t.symbol];
     if (!already && openCount >= p.maxPositions) block('positions', 'Open positions', `Already holding ${openCount} positions (limit ${p.maxPositions}).`);
   }
 
   // 8. Duplicates
-  const dup = (ctx.openOrders || []).find((o) => o.symbol === t.symbol && o.side === t.side && OPEN_STATES.has(o.state) && (o.kind || 'stock') === t.kind);
+  const side = t.kind === 'option' ? t.legs?.[0]?.side : t.side;
+  const cid = t.kind === 'option' ? t.legs?.[0]?.contractId : null;
+  const dup = (ctx.openOrders || []).find((o) => o.symbol === t.symbol && (o.side === t.side || o.side === side) && OPEN_STATES.has(o.state) && (o.kind || 'stock') === t.kind && (!cid || !o.contractId || o.contractId === cid));
   if (dup) block('duplicate', 'Duplicate order', `An open ${t.side} order for ${t.symbol} is already working.`);
 
   // 9. Pattern day trading guard

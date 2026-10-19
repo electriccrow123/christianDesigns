@@ -178,3 +178,70 @@ test('the Head Honcho’s exit changes apply before the Operator, who may only t
 function round2(x) {
   return Math.round(x * 100) / 100;
 }
+
+function failingHonchoAI() {
+  return {
+    async json(prompt, { agent }) {
+      if (agent === 'scout') return { marketRead: 'ok', setups: 'not an array', avoid: [], keyLevels: [] };
+      if (agent === 'analyst') return { summary: 'ok', ideas: {}, eventRisks: [], avoid: [] };
+      if (agent === 'honcho') throw new Error('upstream_error');
+      return { tickets: [], positionReview: [], log: '' };
+    },
+    async text() {
+      return { text: 'ok' };
+    },
+  };
+}
+
+test('a triggered stop goes out before the agents, even when the Head Honcho fails', async () => {
+  const { desk, store, paper } = setup([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x' }]);
+  await desk.runCycle('intraday');
+  const px = (await fakeMarket().quotes(['AAPL']))[0].price;
+  await desk.setExitPlan('AAPL', { stop: round2(px * 1.01), target: round2(px * 1.2) }); // stop is above the price: triggered
+  const desk2 = createDesk({ market: fakeMarket(), brokers: { paper, live: null }, ai: failingHonchoAI(), store, now: () => NOW });
+  const cycle = await desk2.runCycle('intraday');
+  assert.equal(cycle.status, 'error');
+  const exit = (await desk2.listIntents()).find((i) => i.source === 'exit');
+  assert.equal(exit?.status, 'filled');
+  assert.equal((await desk2.snapshot({ force: true })).stocks.length, 0);
+});
+
+test('stale plans for positions no longer held are dropped instead of selling the new position', async () => {
+  const { desk } = setup([]);
+  await desk.setExitPlan('MSFT', { stop: 99999, target: 100000 }); // left over from an old round trip
+  await desk.runCycle('intraday');
+  assert.equal((await desk.getExits()).MSFT, undefined);
+  assert.equal((await desk.listIntents()).filter((i) => i.source === 'exit').length, 0);
+});
+
+test('an old exit intent that matches no order expires and stops blocking new exits', async () => {
+  const { desk, store, paper } = setup([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x' }]);
+  await desk.runCycle('intraday');
+  const old = NOW.getTime() - 2 * 86400000;
+  await store.set('intents/old-exit', { id: 'old-exit', source: 'exit', symbol: 'AAPL', status: 'sent', createdAt: old, updatedAt: old, ticket: { kind: 'stock', symbol: 'AAPL' }, broker: { orderId: 'gone' } });
+  const px = (await fakeMarket().quotes(['AAPL']))[0].price;
+  await desk.setExitPlan('AAPL', { stop: round2(px * 1.01), target: round2(px * 1.2) });
+  const desk2 = createDesk({ market: fakeMarket(), brokers: { paper, live: null }, ai: scriptedAI([]), store, now: () => NOW });
+  await desk2.runCycle('intraday');
+  assert.equal((await store.get('intents/old-exit')).status, 'expired');
+  assert.ok((await desk2.listIntents()).some((i) => i.source === 'exit' && i.status === 'filled'));
+});
+
+test('orders in one cycle share the buying power instead of each spending all of it', async () => {
+  const syms = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'META'];
+  const { desk } = setup([...syms.map((s, i) => ({ id: `d${i + 1}`, action: 'open', symbol: s, vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 20, when: 'now', why: s })), { id: 'd9', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 5, when: 'now', why: 'again' }], 1000);
+  await desk.runCycle('intraday');
+  const intents = await desk.listIntents();
+  const spent = intents.filter((i) => i.status === 'filled').reduce((a, i) => a + (i.gate?.cost || 0), 0);
+  assert.ok(spent > 600 && spent <= 1000 * 0.85 + 1, `spent ${spent}`); // 85% invested cap across all five
+  assert.equal(intents.filter((i) => i.symbol === 'AAPL' && i.status === 'filled').length, 1); // the second AAPL buy is a duplicate
+});
+
+test('an owner trim keeps the exit plan for the shares that remain', async () => {
+  const { desk } = setup([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x' }]);
+  await desk.runCycle('intraday');
+  const before = (await desk.getExits()).AAPL;
+  const r = await desk.closePosition({ symbol: 'AAPL', fraction: 0.5 });
+  assert.equal(r.status, 'filled');
+  assert.equal((await desk.getExits()).AAPL?.stop, before.stop);
+});

@@ -122,6 +122,7 @@ export function mapOptionOrder(o) {
     kind: 'option',
     symbol: o.chain_symbol,
     side: legs[0]?.side,
+    contractId: legs[0]?.contractId,
     type: o.trigger === 'stop' ? (o.type === 'limit' ? 'stop_limit' : 'stop_market') : o.type,
     state: o.state,
     qty: q,

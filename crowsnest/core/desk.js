@@ -44,6 +44,8 @@ const P = {
 export const PATHS = P;
 
 const ACTIVE_INTENT = new Set(['watching', 'planned', 'proposed', 'queued', 'needs_review', 'sent', 'pending_approval', 'working']);
+// An order for these is at the broker (or on its way), so the same exit must not be sent again.
+const ORDER_LIVE = new Set(['sending', 'sent', 'working', 'pending_approval']);
 
 export function createDesk({ market, brokers, ai, store, now = () => new Date(), log = () => {} }) {
   const cache = { analyses: new Map(), snapshot: null, snapshotAt: 0 };
@@ -81,6 +83,29 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     return plans;
   }
 
+  /** Drop exit plans for positions that are gone (or that belong to the other book), keeping plans of orders still working. */
+  async function pruneExitPlans(snap, intents) {
+    const plans = await getExits();
+    const held = new Set([...snap.stocks.map((s) => s.symbol), ...snap.options.map((o) => o.id)]);
+    const working = new Set(intents.filter((i) => ORDER_LIVE.has(i.status) || i.status === 'queued').map((i) => i.id));
+    let changed = false;
+    for (const [k, p] of Object.entries(plans)) {
+      const otherBook = p?.live != null && p.live !== !!snap.live;
+      if (otherBook || (!held.has(k) && !(p?.intentId && working.has(p.intentId)))) {
+        delete plans[k];
+        changed = true;
+      }
+    }
+    if (changed) await store.set(P.exits, { plans });
+    return plans;
+  }
+  /** Whether an existing intent already covers this exit (an order working, or one queued today for the owner). */
+  function blocksExit(i, ticket) {
+    if (i.source !== 'exit' || i.symbol !== ticket.symbol) return false;
+    if ((i.ticket?.legs?.[0]?.contractId || null) !== (ticket.legs?.[0]?.contractId || null)) return false;
+    return ORDER_LIVE.has(i.status) || (i.status === 'queued' && todayNY(new Date(i.createdAt)) === todayNY(now()));
+  }
+
   async function brokerFor(settings) {
     return settings.broker === 'live' && brokers.live ? brokers.live : brokers.paper;
   }
@@ -102,7 +127,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const st = await getState();
     const today = todayNY(now());
     const eq = snap.portfolio?.equity;
-    if (!Number.isFinite(eq)) return;
+    if (!(eq > 0)) return; // a partial snapshot must not reset the day's start or the peak
     const patch = {};
     const mode = snap.live ? 'live' : 'paper';
     if (!st.day || st.day.date !== today || st.day.mode !== mode) patch.day = { date: today, mode, startEquity: round(eq - (snap.portfolio.dayChange || 0), 2) };
@@ -199,6 +224,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const frac = decision.action === 'trim' ? 0.5 : 1;
       const st = snap.stocks.find((s) => s.symbol === sym);
       const opts = snap.options.filter((o) => o.symbol === sym && (!decision.contractId || o.id === decision.contractId));
+      if (decision.contractId && !opts.length) return { ticket: null, candidates: [], notes: [`No held ${sym} option matches ${decision.contractId}.`] };
       if (st && (vehicle === 'stock' || !opts.length)) {
         const avail = st.available ?? st.qty;
         let qtyOut = Number.isInteger(avail) ? Math.max(1, Math.floor(avail * frac)) : round(avail * frac, 6);
@@ -321,6 +347,11 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       }
       if (Number(op.limitPrice) > 0) t.price = tickRound(Number(op.limitPrice), { option: true });
       if (Number(op.quantity) >= 1) t.quantity = Math.floor(Number(op.quantity));
+    } else if (t.kind === 'stock' && (t.side === 'sell' || t.positionEffect === 'close')) {
+      // Closing orders keep the drafted size and order type; the Operator may only shrink the size or move a limit.
+      const q = Number(op.quantity);
+      if (q > 0 && t.quantity && q < t.quantity) t.quantity = Number.isInteger(t.quantity) ? Math.max(1, Math.floor(q)) : round(q, 6);
+      if (Number(op.limitPrice) > 0 && t.orderType === 'limit') t.limitPrice = Number(op.limitPrice);
     } else if (t.kind === 'stock') {
       if (Number(op.dollars) >= 1) {
         t.dollars = round(Number(op.dollars), 2);
@@ -357,7 +388,23 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     return `${t.positionEffect === 'close' ? 'Close' : what} ${t.symbol} ${legs} ×${t.quantity}${t.price ? ` @ ${money(t.price)}` : ''}`;
   }
 
-  async function gateContext({ settings, state, snap, params, quotes }) {
+  /** Orders already approved earlier in the same cycle, so later tickets see the money and slots they used. */
+  function newPending() {
+    return { spent: 0, optionsSpent: 0, opened: 0, orders: [], bySymbol: {} };
+  }
+  function addPending(pend, ticket, cost) {
+    if (!pend || !ticket) return;
+    const opening = ticket.positionEffect === 'open' || (ticket.kind === 'stock' && ticket.side === 'buy');
+    pend.orders.push({ symbol: ticket.symbol, side: ticket.kind === 'option' ? ticket.legs?.[0]?.side : ticket.side, kind: ticket.kind, contractId: ticket.legs?.[0]?.contractId, state: 'queued', positionEffect: ticket.positionEffect });
+    if (!opening || !(cost > 0)) return;
+    pend.spent += cost;
+    if (ticket.kind === 'option') pend.optionsSpent += cost;
+    pend.opened += 1;
+    pend.bySymbol[ticket.symbol] = (pend.bySymbol[ticket.symbol] || 0) + cost;
+  }
+
+  async function gateContext({ settings, state, snap, params, quotes, pending }) {
+    const pend = pending || newPending();
     const allOrders = snap.orders || [];
     const dt = countDayTrades(allOrders, todayNY(now()));
     const funds = await market.fundamentals(uniq(Object.keys(quotes))).catch(() => ({}));
@@ -366,14 +413,18 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     return {
       params,
       limits: settings.limits,
-      account: { equity: snap.portfolio.equity, buyingPower: snap.portfolio.buyingPower, cash: snap.portfolio.cash, optionLevel: snap.account.optionLevel, isMargin: /margin/.test(snap.account.type || ''), approvalsRequired: snap.account.approvalsRequired },
+      account: { equity: snap.portfolio.equity, buyingPower: (snap.portfolio.buyingPower || 0) - pend.spent, cash: snap.portfolio.cash, optionLevel: snap.account.optionLevel, isMargin: /margin/.test(snap.account.type || ''), approvalsRequired: snap.account.approvalsRequired },
       positions: { stocks: snap.stocks, options: snap.options },
-      openOrders: snap.openOrders || [],
-      day: { startEquity: state.day?.startEquity, tradesOpened: openedToday, dayTradesRolling: dt.count, openedTodaySymbols: dt.openedToday },
+      openOrders: [...(snap.openOrders || []), ...pend.orders],
+      pending: pend.bySymbol,
+      day: { startEquity: state.day?.startEquity, tradesOpened: openedToday + pend.opened, dayTradesRolling: dt.count, openedTodaySymbols: dt.openedToday },
       quotes,
       fundamentals: funds,
       earnings: earn,
-      exposure: exposure({ stocks: snap.stocks, options: snap.options }),
+      exposure: (() => {
+        const ex = exposure({ stocks: snap.stocks, options: snap.options });
+        return { stocks: ex.stocks + pend.spent - pend.optionsSpent, options: ex.options + pend.optionsSpent, invested: ex.invested + pend.spent };
+      })(),
       clock: marketStatus(now()),
       todayIso: todayNY(now()),
       killSwitch: state.killSwitch,
@@ -399,14 +450,19 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
    * Gate one ticket and, if allowed by settings, send it.
    * mode: 'auto' (send if approved) | 'queue' (gate only, wait for the owner) | 'force' (owner pressed Send)
    */
-  async function processTicket(ticket, { settings, state, snap, params, quotes, sendMode }) {
-    const ctx = await gateContext({ settings, state, snap, params, quotes });
+  async function processTicket(ticket, { settings, state, snap, params, quotes, sendMode, pending }) {
+    const ctx = await gateContext({ settings, state, snap, params, quotes, pending });
     const gate = evaluate(ticket, ctx);
     const result = { gate, sent: false, status: gate.decision === 'block' ? 'blocked' : 'queued', broker: null };
     if (gate.decision === 'block') return result;
+    // Reserve this order's money and slot for the rest of the cycle unless it ends up not sent.
+    const reserve = () => addPending(pending, gate.ticket, gate.cost);
     const broker = await brokerFor(settings);
     const send = sendMode === 'force' || sendMode === 'auto';
-    if (!send) return result;
+    if (!send) {
+      reserve(); // queued for the owner: still counts, they may send it
+      return result;
+    }
     try {
       const pv = await broker.preview(gate.ticket, { accountNumber: settings.accountNumber });
       if (pv.alerts?.length && sendMode !== 'force') {
@@ -421,6 +477,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       }
       const placed = await broker.place(gate.ticket, { accountNumber: settings.accountNumber });
       result.sent = placed.ok !== false;
+      if (result.sent) reserve();
       result.status = placed.ok === false ? 'failed' : placed.approvalPending ? 'pending_approval' : placed.state === 'filled' ? 'filled' : 'sent';
       result.broker = { orderId: placed.orderId, state: placed.state, approvalPending: !!placed.approvalPending, message: placed.reason || placed.message, alerts: pv.alerts };
       cache.snapshotAt = 0;
@@ -467,7 +524,9 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const params = resolveParams(modeId, state.paramOverrides, settings.limits);
       const modeText = modeRules(params);
       const plan = await getPlan();
-      const intents = (await listIntents({ limit: 80 })).filter((i) => ACTIVE_INTENT.has(i.status));
+      // Bring intents up to date with the broker first, so finished or stale orders stop blocking new ones.
+      await reconcile(snap).catch((e) => log('reconcile failed', e));
+      const intents = (await listIntents({ limit: 80 })).filter((i) => ACTIVE_INTENT.has(i.status) || i.status === 'sending');
       const held = uniq([...snap.stocks.map((s) => s.symbol), ...snap.options.map((o) => o.symbol)]);
       const focus = (plan.week?.focus || []).map((f) => f.symbol).filter(Boolean);
       const universe = uniq([...INDEX_ETFS, ...held, ...focus, ...intents.map((i) => i.symbol), ...settings.watchlist]).slice(0, 30);
@@ -492,17 +551,73 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         .sort((a, b) => Math.abs(b.score) + (held.includes(b.symbol) ? 40 : 0) + (focus.includes(b.symbol) ? 25 : 0) - (Math.abs(a.score) + (held.includes(a.symbol) ? 40 : 0) + (focus.includes(a.symbol) ? 25 : 0)));
       say('system', 'Data gathered', `${universe.length} symbols analyzed. Market regime: ${regime.label} (${regime.score > 0 ? '+' : ''}${regime.score}), volatility ${regime.volatility}. Account ${money(snap.portfolio.equity)} with ${money(snap.portfolio.buyingPower)} buying power. Mode: ${params.mode.name}.`);
 
-      // Positions without an exit plan are adopted from today's price before exits are checked.
-      const adopted = adoptionPlans({ positions: snap, plans: await getExits(), quotes, params });
+      // Plans for positions no longer held (or from the other book) are dropped; positions without a plan
+      // are adopted from today's price before exits are checked.
+      const kept = await pruneExitPlans(snap, intents);
+      const adopted = adoptionPlans({ positions: snap, plans: kept, quotes, params });
       if (Object.keys(adopted).length) {
-        await store.set(P.exits, { plans: { ...(await getExits()), ...adopted } });
+        await store.set(P.exits, { plans: { ...kept, ...Object.fromEntries(Object.entries(adopted).map(([k, p]) => [k, { ...p, live: !!snap.live, updatedAt: Date.now() }])) } });
         say('system', 'Adopted positions', Object.entries(adopted).map(([k, p]) => `${snap.options.find((o) => o.id === k) ? contractLabel(snap.options.find((o) => o.id === k)) : k}: stop ${p.stop}, target ${p.target}`).join('\n'));
       }
-      // Deterministic exits first (they run whatever the agents say)
+      // Deterministic exits go out first, before any agent runs, so an AI failure can never hold back a stop.
+      const live = settings.broker === 'live';
+      const sendMode = live ? (settings.execution === 'auto' ? 'auto' : 'queue') : 'auto';
+      const pending = newPending();
+      const results = [];
       const exitPlans = await getExits();
-      const sameExit = (i, e) => i.source === 'exit' && i.symbol === e.ticket.symbol && (i.ticket?.legs?.[0]?.contractId || null) === (e.ticket.legs?.[0]?.contractId || null);
-      const exits = exitSignals({ positions: snap, plans: exitPlans, quotes, params, todayIso: clock.iso, clock }).filter((e) => !intents.some((i) => sameExit(i, e)));
+      const exits = exitSignals({ positions: snap, plans: exitPlans, quotes, params, todayIso: clock.iso, clock }).filter((e) => !intents.some((i) => blocksExit(i, e.ticket)));
       if (exits.length) say('system', 'Exit rules triggered', exits.map((e) => `${e.ticket.symbol}: ${e.reason}`).join('\n'));
+      const exitKeys = new Set(exits.map((e) => e.ticket.legs?.[0]?.contractId || e.ticket.symbol));
+      const record = async (item, { params: p, research = {} }) => {
+        const d = item.decision;
+        const intent = {
+          id: uuid(),
+          createdAt: Date.now(),
+          cycleId: cycle.id,
+          decisionId: d.id,
+          source: item.kind === 'exit' ? 'exit' : 'cycle',
+          action: d.action,
+          symbol: d.symbol,
+          vehicle: d.vehicle || (item.ticket?.kind === 'option' ? item.ticket.strategy : 'stock'),
+          direction: d.direction,
+          conviction: d.conviction,
+          sizePct: d.sizePct,
+          why: d.why,
+          teach: d.teach,
+          research: {
+            scout: (research.scout?.setups || []).find((x) => x.symbol === d.symbol) || null,
+            analyst: (research.analyst?.ideas || []).find((x) => x.symbol === d.symbol) || null,
+            technical: analyses[d.symbol] ? analyses[d.symbol].summary : null,
+          },
+          operatorNote: item.op?.note || item.ticket?.meta?.operatorNote || null,
+          draftNotes: item.draft?.notes || [],
+          candidates: (item.draft?.candidates || []).slice(0, 4),
+          live,
+          mode: p.mode.id,
+        };
+        if (item.kind === 'veto') {
+          Object.assign(intent, { status: 'vetoed', headline: headlineFor(item.draft?.ticket, d), vetoReason: item.reason });
+          await saveIntent(intent);
+          say('operator', `Vetoed ${d.symbol}`, item.reason);
+          return;
+        }
+        if (!item.ticket) {
+          Object.assign(intent, { status: 'skipped', headline: headlineFor(null, d), vetoReason: (item.draft?.notes || []).join(' ') || 'No ticket could be built.' });
+          await saveIntent(intent);
+          say('system', `Skipped ${d.symbol}`, intent.vetoReason);
+          return;
+        }
+        item.ticket.meta = { ...item.ticket.meta, intentId: intent.id, cycleId: cycle.id, agent: true };
+        item.ticket.id = intent.id; // doubles as the broker's idempotency key (ref_id)
+        const r = await processTicket(item.ticket, { settings, state, snap, params: p, quotes, pending, sendMode });
+        Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, headline: headlineFor(r.gate.ticket, d), exit: r.gate.ticket.exit || d.exit || null });
+        await saveIntent(intent);
+        if (r.status === 'filled' || r.status === 'sent' || r.status === 'pending_approval') await rememberExit(intent, snap);
+        results.push({ intentId: intent.id, symbol: d.symbol, status: r.status, gate: r.gate.decision, summary: r.gate.summary, broker: r.broker });
+        say('gate', `${r.gate.decision === 'block' ? 'Blocked' : r.gate.decision === 'resize' ? 'Resized' : 'Approved'}: ${intent.headline}`, `${r.gate.summary}${r.status !== 'blocked' ? `\nStatus: ${statusText(r.status)}${r.broker?.message ? ` — ${r.broker.message}` : ''}` : ''}`);
+      };
+      for (const e of exits) await record({ kind: 'exit', reason: e.reason, ticket: e.ticket, decision: { id: `exit-${e.ticket.symbol}`, action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, conviction: 5 } }, { params });
+      abort();
 
       // 2. Researchers in parallel
       const universeBrief = ranked.slice(0, 18).map(brief);
@@ -540,8 +655,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       // The background autopilot answers agent prompts out of process and resumes the cycle.
       const paused = [scoutRes, analystRes].find((r) => r.status === 'rejected' && r.reason?.code === 'need_agent');
       if (paused) throw paused.reason;
-      const scout = scoutRes.status === 'fulfilled' ? scoutRes.value : null;
-      const analyst = analystRes.status === 'fulfilled' ? analystRes.value : null;
+      const scout = scoutRes.status === 'fulfilled' && scoutRes.value && typeof scoutRes.value === 'object' ? { ...scoutRes.value, setups: arr(scoutRes.value.setups) } : null;
+      const analyst = analystRes.status === 'fulfilled' && analystRes.value && typeof analystRes.value === 'object' ? { ...analystRes.value, ideas: arr(analystRes.value.ideas) } : null;
       if (scout) say('scout', 'Chart read', [scout.marketRead, ...(scout.setups || []).slice(0, 6).map((s) => `• ${s.symbol} ${s.bias} — ${s.setup} (${s.confidence}%): entry ${s.entry ?? '—'}, stop ${s.stop ?? '—'}, target ${s.target ?? '—'}. ${s.why || ''}`)].filter(Boolean).join('\n'), scout);
       else say('scout', 'Unavailable', `Scout could not report this cycle (${scoutRes.reason?.message || scoutRes.reason?.code || 'error'}).`);
       if (analyst) say('analyst', 'Options & catalysts', [analyst.summary, ...(analyst.ideas || []).slice(0, 6).map((i) => `• ${i.symbol} ${i.direction} via ${STRATEGIES[i.vehicle]?.name || i.vehicle} (${i.confidence}%) — IV ${i.ivView || '?'}; ${i.catalyst || 'no catalyst'}. ${i.why || ''}`)].filter(Boolean).join('\n'), analyst);
@@ -580,7 +695,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
             directives: (state.directives || []).slice(-12).map((d) => d.text),
             recentCycles,
             weekEvents: wk,
-            exitSignals: exits.map((e) => ({ symbol: e.ticket.symbol, reason: e.reason })),
+            exitSignals: results.map((r) => ({ symbol: r.symbol, status: r.status, reason: exits.find((e) => e.ticket.symbol === r.symbol)?.reason })),
           }),
           { tier: AGENTS.honcho.tier, effort: AGENTS.honcho.effort, signal, agent: 'honcho' },
         );
@@ -593,7 +708,11 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       cycle.summary = String(honcho.summary || '');
       cycle.marketView = honcho.marketView;
       cycle.messageToOwner = honcho.messageToOwner || '';
-      const decisions = (Array.isArray(honcho.decisions) ? honcho.decisions : []).slice(0, 12).map((d, i) => ({ ...d, id: d.id || `d${i + 1}`, symbol: String(d.symbol || '').toUpperCase() }));
+      if (!honcho || typeof honcho !== 'object') throw new Error('Head Honcho returned no decisions.');
+      const decisions = arr(honcho.decisions)
+        .filter((d) => d && typeof d === 'object')
+        .slice(0, 12)
+        .map((d, i) => ({ ...d, id: String(d.id || `d${i + 1}`), action: String(d.action || 'watch').toLowerCase(), symbol: String(d.symbol || '').toUpperCase() }));
       cycle.decisions = decisions;
       say('honcho', cycle.headline || 'Decisions', [cycle.summary, ...decisions.map((d) => `• ${d.action.toUpperCase()} ${d.symbol}${d.vehicle && d.action === 'open' ? ` (${STRATEGIES[d.vehicle]?.name || d.vehicle})` : ''}${d.conviction ? ` — conviction ${d.conviction}/5` : ''}${d.sizePct ? `, ${d.sizePct}% size` : ''}${d.when === 'on_trigger' ? `, when: ${d.trigger}` : ''}. ${d.why || ''}`)].join('\n'));
 
@@ -619,13 +738,16 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       if (Array.isArray(honcho.memory) && honcho.memory.length) statePatch.memory = [...(state.memory || []), ...honcho.memory.slice(0, 5).map((m) => ({ at: Date.now(), text: String(m).slice(0, 300) }))].slice(-30).map((m) => (typeof m === 'string' ? { at: Date.now(), text: m } : m));
       statePatch.lastCycle = { id: cycle.id, kind, at: cycle.at, headline: cycle.headline };
       state = await patchState(statePatch);
-      const live = settings.broker === 'live';
       const finalParams = resolveParams(params.mode.id, state.paramOverrides, settings.limits);
 
       // 4. Draft tickets in code, then 5. the Operator reviews them
       const drafts = [];
       const nonTrade = [];
       for (const d of decisions) {
+        if (['close', 'trim'].includes(d.action) && exitKeys.has(d.contractId || d.symbol)) {
+          say('system', `Skipped ${d.symbol}`, `An exit rule already closed ${d.symbol} this cycle.`);
+          continue;
+        }
         if (['open', 'close', 'trim'].includes(d.action) && d.when !== 'on_trigger') {
           const dr = await draftTicket(d, { params: finalParams, snap, quotes, analyses }).catch((e) => ({ ticket: null, candidates: [], notes: [e.message] }));
           drafts.push({ decision: d, ...dr });
@@ -639,7 +761,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         const patch = {};
         for (const k of ['stop', 'target']) if (Number(d.exit[k]) > 0) patch[k] = Number(d.exit[k]);
         if (d.exit.timeStop !== undefined) patch.timeStop = d.exit.timeStop || null;
-        await setExitPlan(key, { ...exitPlansNow[key], ...patch, adopted: false, note: `Set by the Head Honcho: ${firstSentenceOf(d.why)}` });
+        await setExitPlan(key, { ...exitPlansNow[key], ...patch, adopted: false, live: !!snap.live, note: `Set by the Head Honcho: ${firstSentenceOf(d.why)}` });
         say('honcho', `New exit plan for ${d.symbol}`, `Stop ${patch.stop ?? '—'}, target ${patch.target ?? '—'}${patch.timeStop ? `, time stop ${patch.timeStop}` : ''}.`);
       }
       const plansNow = await getExits();
@@ -668,12 +790,13 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         }
       }
       abort();
-      if (operator) {
+      if (operator && typeof operator === 'object') {
+        operator = { ...operator, tickets: arr(operator.tickets), positionReview: arr(operator.positionReview) };
         cycle.operator = slim(operator, { maxArray: 12, maxString: 500 });
-        say('operator', 'Orders built', [operator.log, ...(operator.tickets || []).map((t) => `• ${t.decisionId}: ${t.verdict}${t.vetoReason ? ` — ${t.vetoReason}` : ''}${t.note ? ` — ${t.note}` : ''}`)].filter(Boolean).join('\n'));
+        say('operator', 'Orders built', [operator.log, ...operator.tickets.map((t) => `• ${t.decisionId}: ${t.verdict}${t.vetoReason ? ` — ${t.vetoReason}` : ''}${t.note ? ` — ${t.note}` : ''}`)].filter(Boolean).join('\n'));
         // Position reviews may tighten a stop (never loosen it) and move a target, within sane bounds.
-        for (const r of operator.positionReview || []) {
-          if (!r.key || (!r.newStop && !r.newTarget)) continue;
+        for (const r of operator.positionReview) {
+          if (!r || !r.key || (!r.newStop && !r.newTarget)) continue;
           const stock = snap.stocks.find((x) => x.symbol === r.key);
           const opt = snap.options.find((x) => x.id === r.key);
           if (!stock && !opt) continue;
@@ -686,69 +809,15 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
           const nt = Number(r.newTarget);
           if (nt > 0 && px > 0 && (long ? nt > px : nt < px)) patch.target = nt;
           if (!Object.keys(patch).length) continue;
-          await setExitPlan(r.key, { ...cur, ...patch, note: `Operator: ${String(r.note || '').slice(0, 240)}` });
+          await setExitPlan(r.key, { ...cur, ...patch, live: !!snap.live, note: `Operator: ${String(r.note || '').slice(0, 240)}` });
         }
       }
 
-      // 6. Gate + 7. execute
-      const sendMode = live ? (settings.execution === 'auto' ? 'auto' : 'queue') : 'auto';
-      const results = [];
-      const allTickets = [
-        ...exits.map((e) => ({ kind: 'exit', reason: e.reason, ticket: e.ticket, decision: { id: `exit-${e.ticket.symbol}`, action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, conviction: 5 } })),
-        ...drafts.map((d) => {
-          const op = (operator?.tickets || []).find((t) => t.decisionId === d.decision.id);
-          if (op?.verdict === 'veto') return { kind: 'veto', decision: d.decision, reason: op.vetoReason || 'Operator vetoed', draft: d };
-          const ticket = d.ticket ? applyOperator(d, op) : null;
-          return { kind: 'trade', decision: d.decision, ticket, draft: d, op };
-        }),
-      ];
-      for (const item of allTickets) {
-        const d = item.decision;
-        const intent = {
-          id: uuid(),
-          createdAt: Date.now(),
-          cycleId: cycle.id,
-          decisionId: d.id,
-          source: item.kind === 'exit' ? 'exit' : 'cycle',
-          action: d.action,
-          symbol: d.symbol,
-          vehicle: d.vehicle || (item.ticket?.kind === 'option' ? item.ticket.strategy : 'stock'),
-          direction: d.direction,
-          conviction: d.conviction,
-          sizePct: d.sizePct,
-          why: d.why,
-          teach: d.teach,
-          research: {
-            scout: (scout?.setups || []).find((s) => s.symbol === d.symbol) || null,
-            analyst: (analyst?.ideas || []).find((s) => s.symbol === d.symbol) || null,
-            technical: analyses[d.symbol] ? analyses[d.symbol].summary : null,
-          },
-          operatorNote: item.op?.note || item.ticket?.meta?.operatorNote || null,
-          draftNotes: item.draft?.notes || [],
-          candidates: (item.draft?.candidates || []).slice(0, 4),
-          live,
-          mode: finalParams.mode.id,
-        };
-        if (item.kind === 'veto') {
-          Object.assign(intent, { status: 'vetoed', headline: headlineFor(item.draft?.ticket, d), vetoReason: item.reason });
-          await saveIntent(intent);
-          say('operator', `Vetoed ${d.symbol}`, item.reason);
-          continue;
-        }
-        if (!item.ticket) {
-          Object.assign(intent, { status: 'skipped', headline: headlineFor(null, d), vetoReason: (item.draft?.notes || []).join(' ') || 'No ticket could be built.' });
-          await saveIntent(intent);
-          say('system', `Skipped ${d.symbol}`, intent.vetoReason);
-          continue;
-        }
-        item.ticket.meta = { ...item.ticket.meta, intentId: intent.id, cycleId: cycle.id, agent: true };
-        item.ticket.id = intent.id; // doubles as the broker's idempotency key (ref_id)
-        const r = await processTicket(item.ticket, { settings, state, snap, params: finalParams, quotes, sendMode: item.kind === 'exit' && live && settings.execution !== 'auto' ? 'queue' : sendMode });
-        Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, headline: headlineFor(r.gate.ticket, d), exit: r.gate.ticket.exit || d.exit || null });
-        await saveIntent(intent);
-        if (r.status === 'filled' || r.status === 'sent' || r.status === 'pending_approval') await rememberExit(intent);
-        results.push({ intentId: intent.id, symbol: d.symbol, status: r.status, gate: r.gate.decision, summary: r.gate.summary, broker: r.broker });
-        say('gate', `${r.gate.decision === 'block' ? 'Blocked' : r.gate.decision === 'resize' ? 'Resized' : 'Approved'}: ${intent.headline}`, `${r.gate.summary}${r.status !== 'blocked' ? `\nStatus: ${statusText(r.status)}${r.broker?.message ? ` — ${r.broker.message}` : ''}` : ''}`);
+      // 6. Gate + 7. execute the trades (exits went out first)
+      for (const d of drafts) {
+        const op = (operator?.tickets || []).find((t) => t && t.decisionId === d.decision.id);
+        if (op?.verdict === 'veto') await record({ kind: 'veto', decision: d.decision, reason: op.vetoReason || 'Operator vetoed', draft: d }, { params: finalParams });
+        else await record({ kind: 'trade', decision: d.decision, ticket: d.ticket ? applyOperator(d, op) : null, draft: d, op }, { params: finalParams, research: { scout, analyst } });
       }
       // Watches and triggers become intents too
       for (const d of nonTrade) {
@@ -820,11 +889,21 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     for (const i of intents.slice(600)) await store.remove(`${P.intents}/${i.id}`);
   }
 
-  async function rememberExit(intent) {
+  async function rememberExit(intent, snap) {
     const t = intent.ticket;
     if (!t || t.positionEffect !== 'open' || !t.exit) return;
     const key = t.kind === 'stock' ? t.symbol : t.legs?.[0]?.contractId;
-    if (key) await setExitPlan(key, { stop: t.exit.stop, target: t.exit.target, timeStop: t.exit.timeStop, basis: t.exit.basis || (t.kind === 'stock' ? 'stock_price' : 'option_premium'), intentId: intent.id });
+    if (!key) return;
+    const cur = (await getExits())[key];
+    const heldBefore = t.kind === 'stock' ? snap?.stocks?.some((s) => s.symbol === key) : snap?.options?.some((o) => o.id === key);
+    if (cur && heldBefore) {
+      // Adding to a holding keeps its plan; the only change allowed is a tighter stop.
+      const long = t.kind === 'stock' || t.legs?.[0]?.side === 'buy';
+      const ns = Number(t.exit.stop);
+      if (ns > 0 && (!(cur.stop > 0) || (long ? ns > cur.stop : ns < cur.stop))) await setExitPlan(key, { stop: ns });
+      return;
+    }
+    await setExitPlan(key, { stop: t.exit.stop, target: t.exit.target, timeStop: t.exit.timeStop, basis: t.exit.basis || (t.kind === 'stock' ? 'stock_price' : 'option_premium'), intentId: intent.id, live: !!intent.live, adopted: false });
   }
 
   // ------------------------------------------------------------ owner actions on intents
@@ -841,7 +920,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const r = await processTicket(ticket, { settings, state, snap, params, quotes, sendMode: force ? 'force' : 'auto' });
     Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, sentBy: 'owner' });
     await saveIntent(intent);
-    if (['filled', 'sent', 'pending_approval'].includes(r.status)) await rememberExit(intent);
+    if (['filled', 'sent', 'pending_approval'].includes(r.status)) await rememberExit(intent, snap);
     return intent;
   }
 
@@ -888,13 +967,13 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const r = await processTicket(dr.ticket, { settings, state, snap, params, quotes, sendMode: 'force' });
     Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, headline: headlineFor(r.gate.ticket, decision) });
     await saveIntent(intent);
-    if (['filled', 'sent'].includes(r.status)) await setExitPlan(contractId || symbol, null);
+    if (['filled', 'sent'].includes(r.status) && fraction >= 1) await setExitPlan(contractId || symbol, null);
     return intent;
   }
 
   /** Match sent intents to broker orders and update their status. */
   async function reconcile(snap) {
-    const intents = (await listIntents({ limit: 80 })).filter((i) => ['sent', 'pending_approval', 'working', 'sending'].includes(i.status));
+    const intents = (await listIntents({ limit: 80 })).filter((i) => ['sent', 'pending_approval', 'working', 'sending', 'queued', 'needs_review'].includes(i.status));
     if (!intents.length) return [];
     const changed = [];
     for (const i of intents) {
@@ -905,8 +984,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         else if (['cancelled', 'canceled'].includes(ord.state)) status = 'cancelled';
         else if (['rejected', 'failed', 'voided'].includes(ord.state)) status = 'rejected';
         else if (ord.state === 'partially_filled') status = 'working';
-      } else if (i.status === 'pending_approval' && Date.now() - i.updatedAt > 24 * 3600 * 1000) status = 'expired';
-      else if (i.status === 'sending' && Date.now() - i.updatedAt > 30 * 60 * 1000) status = 'failed'; // the autopilot never confirmed it
+      } else if (i.status === 'sending' && Date.now() - i.updatedAt > 30 * 60 * 1000) status = 'failed'; // the autopilot never confirmed it
+      else if (i.status !== 'sending' && Date.now() - (i.updatedAt || i.createdAt || 0) > 20 * 3600 * 1000) status = 'expired'; // no matching order after a day
       if (status !== i.status) {
         const next = await saveIntent({ ...i, status, fill: ord ? { avgPrice: ord.avgPrice, qty: ord.filledQty, at: ord.updatedAt } : i.fill });
         changed.push(next);
@@ -921,25 +1000,26 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const snap = given || (await snapshot({ force: true }));
     const state = await getState();
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
-    let plans = await getExits();
+    const recent = await listIntents({ limit: 80 });
+    let plans = await pruneExitPlans(snap, recent);
     const syms = snap.stocks.map((s) => s.symbol);
     const quotes = Object.fromEntries((await market.quotes(syms).catch(() => [])).map((q) => [q.symbol, q]));
     const adopted = adoptionPlans({ positions: snap, plans, quotes, params });
     if (Object.keys(adopted).length) {
-      plans = { ...plans, ...adopted };
+      plans = { ...plans, ...Object.fromEntries(Object.entries(adopted).map(([k, p]) => [k, { ...p, live: !!snap.live, updatedAt: Date.now() }])) };
       await store.set(P.exits, { plans });
     }
     const exits = exitSignals({ positions: snap, plans, quotes, params, todayIso: todayNY(now()), clock: marketStatus(now()) });
-    const existing = (await listIntents({ limit: 60 })).filter((i) => i.source === 'exit' && ACTIVE_INTENT.has(i.status));
     const out = [];
+    const pending = newPending();
     for (const e of exits) {
-      if (existing.some((i) => i.symbol === e.ticket.symbol && i.ticket?.legs?.[0]?.contractId === e.ticket.legs?.[0]?.contractId)) continue;
+      if (recent.some((i) => blocksExit(i, e.ticket))) continue;
       const intent = { id: uuid(), createdAt: Date.now(), source: 'exit', action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, live: settings.broker === 'live', mode: params.mode.id };
       e.ticket.id = intent.id;
       e.ticket.meta = { ...e.ticket.meta, intentId: intent.id, agent: true };
       const live = settings.broker === 'live';
       const sendMode = !live ? 'auto' : execute && settings.execution === 'auto' ? 'auto' : 'queue';
-      const r = await processTicket(e.ticket, { settings, state, snap, params, quotes, sendMode });
+      const r = await processTicket(e.ticket, { settings, state, snap, params, quotes, sendMode, pending });
       Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, headline: headlineFor(r.gate.ticket, intent) });
       await saveIntent(intent);
       out.push(intent);
@@ -1162,6 +1242,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     paths: P,
   };
 }
+
+const arr = (x) => (Array.isArray(x) ? x : []);
 
 function firstSentenceOf(t = '') {
   const m = String(t || '').match(/^.{0,200}?[.!?](\s|$)/);

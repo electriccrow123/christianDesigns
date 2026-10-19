@@ -8,8 +8,11 @@
 //
 // Commands
 //   node bin/autopilot.mjs slot                 which check-in is due now (JSON)
-//   node bin/autopilot.mjs run <dir> [kind]     run or resume a cycle
+//   node bin/autopilot.mjs run <dir> [kind]     run or resume a cycle (refuses once out/outbox.json exists; --force overrides)
 //   node bin/autopilot.mjs finalize <dir>       apply <dir>/results.json and rebuild the writes
+//
+// Writes to documents that already existed are exported as `update` diffs (changed keys only, removed
+// keys as {"__delete__": true}), so a conflict retry never overwrites what the owner changed meanwhile.
 
 import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -21,7 +24,9 @@ import { mapAccount, mapEquityQuotes, mapOptionQuotes, mapInstruments, buildSnap
 import { chunk } from '../core/util.js';
 
 const OCC = /^[A-Z.]+\d{6}[CP]\d{8}$/;
-const [, , cmd, dirArg, kindArg] = process.argv;
+const argv = process.argv.slice(2);
+const force = argv.includes('--force');
+const [cmd, dirArg, kindArg] = argv.filter((a) => a !== '--force');
 
 const readJson = async (p, fallback = null) => {
   try {
@@ -70,7 +75,51 @@ async function loadDocs(dir) {
     }
   }
   await walk('');
-  return { docs, versions };
+  const missing = Object.keys(docs).filter((p) => versions[p] == null);
+  if (missing.length) throw new Error(`inputs/versions.json has no version for: ${missing.join(', ')}. Add the version each ArtifactData read reported (AUTOPILOT.md step 2).`);
+  return { docs, versions, original: JSON.parse(JSON.stringify(docs)) };
+}
+
+/** Replay market data on resume, so the Operator's reply is applied to the same drafts it reviewed. */
+async function cachedMarket(base, file) {
+  const cache = (await readJson(file, {})) || {};
+  let dirty = false;
+  const out = {};
+  for (const [k, fn] of Object.entries(base)) {
+    if (typeof fn !== 'function') {
+      out[k] = fn;
+      continue;
+    }
+    out[k] = async (...args) => {
+      const key = `${k} ${JSON.stringify(args)}`;
+      if (key in cache) return JSON.parse(JSON.stringify(cache[key]));
+      const v = await fn(...args);
+      cache[key] = v ?? null;
+      dirty = true;
+      return v;
+    };
+  }
+  out.save = async () => {
+    if (dirty) await writeJson(file, cache);
+  };
+  return out;
+}
+
+const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+/** ArtifactData `update` merges objects deeply and replaces arrays, so send only what changed. */
+function diffDoc(before, after) {
+  const out = {};
+  for (const k of Object.keys(after)) {
+    const a = before?.[k];
+    const b = after[k];
+    if (JSON.stringify(a) === JSON.stringify(b)) continue;
+    if (isObj(a) && isObj(b)) {
+      const d = diffDoc(a, b);
+      if (Object.keys(d).length) out[k] = d;
+    } else out[k] = b === undefined ? null : b;
+  }
+  for (const k of Object.keys(before || {})) if (!(k in after)) out[k] = { __delete__: true };
+  return out;
 }
 
 function memoryStore(docs) {
@@ -111,6 +160,7 @@ async function robinhoodState(dir, settings) {
   if (!rh) throw new Error(`Missing ${join(dir, 'inputs', 'robinhood.json')}. Save the Robinhood payloads first (AUTOPILOT.md step 3).`);
   const accounts = rh.accounts?.accounts || rh.accounts || [];
   const agentic = accounts.filter((a) => a.agentic_allowed);
+  if (settings.accountNumber && !agentic.some((x) => x.account_number === settings.accountNumber)) throw new Error('The account in desk/settings is not an agentic account any more. Stopping without trading.');
   const a = agentic.find((x) => x.account_number === settings.accountNumber) || agentic[0];
   if (!a) throw new Error('No agentic Robinhood account in accounts payload.');
   const account = mapAccount(a, rh.approvalSetting);
@@ -135,7 +185,7 @@ async function robinhoodState(dir, settings) {
 }
 
 // ------------------------------------------------------------------ exports for ArtifactData
-async function exportWrites(dir, store, versions) {
+async function exportWrites(dir, store, versions, original = {}) {
   const outDocs = join(dir, 'out', 'docs');
   await rm(outDocs, { recursive: true, force: true });
   const entries = [];
@@ -143,13 +193,18 @@ async function exportWrites(dir, store, versions) {
     const parts = path.split('/');
     const doc_id = parts.pop();
     const collection = parts.join('/');
-    const entry = { op: store.docs[path] ? 'set' : 'delete', collection, doc_id };
-    if (store.docs[path]) {
+    const existed = versions[path] != null;
+    const now = store.docs[path];
+    if (!now && !existed) continue; // created and removed in the same run
+    const entry = { op: !now ? 'delete' : existed ? 'update' : 'set', collection, doc_id };
+    if (now) {
+      const body = existed ? diffDoc(original[path] || {}, now) : now;
+      if (existed && !Object.keys(body).length) continue; // nothing changed
       const file = join(outDocs, collection, doc_id + '.json');
-      await writeJson(file, store.docs[path]);
+      await writeJson(file, body);
       entry.file_path = resolve(file);
     }
-    if (versions[path] != null) entry.if_version = versions[path];
+    if (existed) entry.if_version = versions[path];
     entries.push(entry);
   }
   // The page reads cycles before intents, so write desk/* last: the plan and state then point at
@@ -162,7 +217,10 @@ async function exportWrites(dir, store, versions) {
 
 // ------------------------------------------------------------------ run
 async function run(dir, kind) {
-  const { docs, versions } = await loadDocs(dir);
+  if (existsSync(join(dir, 'out', 'outbox.json')) && !force) {
+    throw new Error(`This cycle already finished: ${join(dir, 'out', 'outbox.json')} exists. Continue at step 6 with those same orders and ref_ids; never run the cycle again (that would create new orders).`);
+  }
+  const { docs, versions, original } = await loadDocs(dir);
   const store = memoryStore(docs);
   const settingsDoc = docs[PATHS.settings] || {};
   if (settingsDoc.broker !== 'live') {
@@ -170,7 +228,7 @@ async function run(dir, kind) {
     return;
   }
   const { snap } = await robinhoodState(dir, settingsDoc);
-  const market = createYahooMarket({ watchlist: () => settingsDoc.watchlist || [] });
+  const market = await cachedMarket(createYahooMarket({ watchlist: () => settingsDoc.watchlist || [] }), join(dir, 'cache', 'market.json'));
   const outbox = [];
   const cancels = [];
   const broker = {
@@ -210,6 +268,7 @@ async function run(dir, kind) {
   };
   const desk = createDesk({ market, brokers: { live: broker, paper: broker }, ai, store, log: (...a) => console.error('[desk]', ...a) });
   const cycle = await desk.runCycle(kind, { source: 'autopilot', prune: false });
+  await market.save();
   if (cycle.status === 'paused') {
     const need = ['scout', 'analyst', 'honcho', 'operator'].filter((a) => existsSync(join(promptsDir, `${a}.txt`)) && !existsSync(join(agentsDir, `${a}.json`)));
     console.log(JSON.stringify({ status: 'need_agents', agents: need, prompts: need.map((a) => resolve(join(promptsDir, `${a}.txt`))), replies: need.map((a) => resolve(join(agentsDir, `${a}.json`))) }, null, 2));
@@ -224,6 +283,8 @@ async function run(dir, kind) {
     if (store.docs[path]) await store.update(path, { status: 'sending', updatedAt: Date.now() });
     const isOption = t.kind === 'option';
     const input = { ...(isOption ? optionInput(t, accountNumber) : equityInput(t, accountNumber)), ref_id: t.id };
+    const opening = t.positionEffect === 'open' && !(t.kind === 'stock' && t.side === 'sell');
+    const lastPx = snap.stocks.find((x) => x.symbol === t.symbol)?.price ?? (await market.quotes([t.symbol]).catch(() => []))[0]?.price ?? null;
     orders.push({
       intentId: t.id,
       headline: store.docs[path]?.headline,
@@ -233,13 +294,15 @@ async function run(dir, kind) {
       place_tool: isOption ? 'place_option_order' : 'place_equity_order',
       review_extra: isOption ? { chain_symbol: t.symbol, underlying_type: 'equity' } : {},
       input,
-      refPrice: isOption ? t.price : t.limitPrice ?? null,
+      opening, // false = closes a position: still sent when the kill switch is on, and exempt from the price check
+      refPrice: isOption ? t.price : t.limitPrice ?? lastPx,
       legsToResolve: isOption ? t.legs.map((l, index) => ({ index, occ: l.contractId, chain_symbol: t.symbol, expiration_date: l.expiration, strike_price: Number(l.strike).toFixed(4), type: l.right })).filter((l) => OCC.test(l.occ)) : [],
     });
   }
   await writeJson(join(dir, 'out', 'outbox.json'), { accountNumber, orders, cancels: cancels.map((o) => ({ tool: o.kind === 'option' ? 'cancel_option_order' : 'cancel_equity_order', input: { account_number: accountNumber, order_id: o.id }, symbol: o.symbol })) });
-  await writeJson(join(dir, 'out', 'state.json'), { docs: Object.fromEntries([...store.dirty].map((p) => [p, store.docs[p] ?? null])), versions });
-  const w = await exportWrites(dir, store, versions);
+  const dirtyPaths = [...store.dirty];
+  await writeJson(join(dir, 'out', 'state.json'), { docs: Object.fromEntries(dirtyPaths.map((p) => [p, store.docs[p] ?? null])), versions, original: Object.fromEntries(dirtyPaths.filter((p) => original[p]).map((p) => [p, original[p]])), cycleId: cycle.id });
+  const w = await exportWrites(dir, store, versions, original);
   const summary = [
     `Cycle ${cycle.id} (${cycle.kind}) ${cycle.status}: ${cycle.headline || cycle.error || ''}`,
     cycle.summary || '',
@@ -254,9 +317,15 @@ async function run(dir, kind) {
 async function finalize(dir) {
   const saved = await readJson(join(dir, 'out', 'state.json'));
   if (!saved) throw new Error('Run the cycle first.');
-  const results = (await readJson(join(dir, 'results.json'), [])) || [];
+  const results = await readJson(join(dir, 'results.json'));
+  if (!Array.isArray(results)) throw new Error(`${join(dir, 'results.json')} is missing or is not a JSON array. Write one entry per outbox order (AUTOPILOT.md step 7), or [] when there were none.`);
+  const outbox = (await readJson(join(dir, 'out', 'outbox.json'))) || { orders: [] };
+  const unrecorded = (outbox.orders || []).filter((o) => !results.some((r) => r.intentId === o.intentId));
+  if (unrecorded.length) throw new Error(`results.json has no entry for: ${unrecorded.map((o) => `${o.intentId} (${o.headline || o.symbol})`).join(', ')}. Record every outbox order, sent or not.`);
   const store = memoryStore({ ...saved.docs });
-  for (const p of Object.keys(saved.docs)) store.dirty.add(p);
+  for (const p of Object.keys(saved.docs)) if (saved.docs[p] != null || (saved.versions || {})[p] != null) store.dirty.add(p);
+  for (const p of Object.keys(saved.docs)) if (saved.docs[p] == null) delete store.docs[p];
+  const cyclePath = saved.cycleId ? `cycles/${saved.cycleId}` : null;
   const exitsPath = PATHS.exits;
   const exits = store.docs[exitsPath]?.plans ? JSON.parse(JSON.stringify(store.docs[exitsPath])) : null;
   for (const r of results) {
@@ -269,6 +338,12 @@ async function finalize(dir) {
     intent.broker = { orderId: r.orderId || null, approvalPending: r.status === 'pending_approval', alerts: r.alerts || [], message: r.message || '' };
     intent.updatedAt = Date.now();
     await store.set(path, intent);
+    const row = cyclePath && store.docs[cyclePath]?.results?.find((x) => x.intentId === r.intentId);
+    if (row) {
+      row.status = intent.status;
+      row.broker = intent.broker;
+      store.dirty.add(cyclePath);
+    }
     if (exits) {
       for (const [occ, rhId] of Object.entries(idmap)) {
         if (exits.plans[occ]) {
@@ -283,7 +358,7 @@ async function finalize(dir) {
     }
   }
   if (exits) await store.set(exitsPath, exits);
-  const w = await exportWrites(dir, store, saved.versions || {});
+  const w = await exportWrites(dir, store, saved.versions || {}, saved.original || {});
   console.log(JSON.stringify({ status: 'finalized', updated: results.length, documents: w.count, batches: w.batches }));
 }
 

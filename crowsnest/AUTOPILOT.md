@@ -16,19 +16,25 @@ below.
    instrument id (step 6a).
 2. Always call the order's `review_tool` before its `place_tool`. If the review returns any
    `order_checks` alert, do **not** place it: record `needs_review` with the alert text verbatim.
-3. If the live Robinhood price has moved more than 1.5% against the order since the cycle priced it
-   (buy: live ask > `refPrice` × 1.015; sell: live bid < `refPrice` × 0.985), skip it and record
-   `failed` with the message `Price moved before sending`.
+3. For an **opening** order (`opening: true`) with a `refPrice`: if the live Robinhood price has moved
+   more than 1.5% against it since the cycle priced it (buy: live ask > `refPrice` × 1.015; sell: live
+   bid < `refPrice` × 0.985), skip it and record `failed` with the message `Price moved before sending`.
+   Closing orders (`opening: false`) are never skipped for price: a stop-loss must go out in a fast
+   market. With no `refPrice`, skip this check.
 4. On a transport error, retry `place_tool` once with the **same** `ref_id`. Never retry a review alert.
 5. Never approve or decline Robinhood trade approvals. Never cancel an order unless it is listed in
    `outbox.cancels`.
 6. If the desk is in paper mode, or `desk/settings` is missing, stop after step 2 and report why.
 7. Do not commit or push anything. The working folder is scratch space.
+8. Never run step 4 again once `out/outbox.json` exists: a new run would create new orders with new
+   `ref_id`s. If `run` says the cycle already finished, continue at step 6 with the orders in that file.
 
 ## Steps
 
 **0. Code.** In the repository, make sure `crowsnest/` exists. If not, check out the branch named
-in the task prompt (`git fetch origin <branch> && git checkout <branch>`). No `npm install` is needed.
+in the task prompt (`git fetch origin <branch> && git checkout <branch>`). If the session has no copy
+of the repository at all, attach it with the `add_repo` tool (read access is enough), clone it as that
+tool says, then check out the branch. No `npm install` is needed.
 Set `WORK` to a new empty folder in your scratchpad (or `/tmp/crowsnest-run-<timestamp>`).
 
 **1. Which check-in.** Run `node crowsnest/bin/autopilot.mjs slot`. If `kind` is `none`, stop: the
@@ -40,8 +46,9 @@ market is closed today.
 - `query` collection `cycles`, `query.order_by` = `{"field":"at","direction":"desc"}`, `query.limit` = 6, `out_dir` = `$WORK/inputs/db`
 
 Then write `$WORK/inputs/versions.json`: an object mapping `"<collection>/<doc_id>"` to the
-`version` each read reported, for example `{"desk/state": 12, "intents/3f2c…": 4}`. The writes in
-step 8 need these.
+`version` each read reported, for example `{"desk/state": 12, "intents/3f2c…": 4}`, with an entry for
+**every** document saved under `inputs/db`. The writes in step 8 need these, and `run` refuses to start
+if one is missing.
 
 Read `$WORK/inputs/db/desk/settings.json`. If `broker` is not `"live"`, stop and report that the desk
 is in paper mode.
@@ -70,6 +77,7 @@ tool result's `data` object exactly as returned.
 **4. Run the cycle.** `node crowsnest/bin/autopilot.mjs run $WORK`
 - Exit code **3** with `"status": "need_agents"`: go to step 5, then run this command again.
 - Exit code **0**: the cycle is complete; go to step 6.
+- Exit code **1** saying the cycle already finished: go to step 6 (hard rule 8).
 - Any other exit code: report the error and stop.
 
 **5. Agents.** The output lists prompt files and the reply file each agent must write.
@@ -82,7 +90,16 @@ tool result's `data` object exactly as returned.
 
 Check that each reply file holds a single valid JSON object, then repeat step 4.
 
-**6. Send the orders** in `$WORK/out/outbox.json` (`orders` and `cancels`; both may be empty):
+**6. Send the orders** in `$WORK/out/outbox.json` (`orders` and `cancels`; both may be empty).
+
+First re-check the owner's switches, which may have changed while the agents worked: `ArtifactData`
+`get` `desk/settings` and `desk/state`.
+- If `broker` is not `"live"` or `execution` is not `"auto"`: send nothing and cancel nothing. Record
+  every order as `failed` with the message `Owner changed settings before sending`.
+- If `killSwitch` is true: send only orders with `opening: false` (closing orders). Record each opening
+  order as `failed` with the message `Kill switch is on`.
+
+Then, for each order you are sending:
 
 a. For each order's `legsToResolve` entry, call `get_option_instruments` with `chain_symbol`,
    `expiration_dates` = `expiration_date`, `strike_price`, `type`. Put the returned instrument's `id`
@@ -95,7 +112,8 @@ d. If the review has alerts → result `needs_review`. Otherwise call `place_too
    placed → `sent`; if it failed → `failed` with the message.
 e. For each entry in `cancels`, call its `tool` with its `input`.
 
-Write `$WORK/results.json`: an array with one entry per order:
+Write `$WORK/results.json`: an array with one entry for **every** order in the outbox, sent or not
+(`finalize` refuses a file that leaves one out):
 `{"intentId": "...", "status": "sent|pending_approval|needs_review|failed", "orderId": "...", "alerts": [], "message": "", "optionIds": {"<occ>": "<robinhood id>"}}`.
 If there were no orders, write `[]`.
 
@@ -103,9 +121,16 @@ If there were no orders, write `[]`.
 
 **8. Write back.** For each `$WORK/out/writes-N.json` file (in order), call `ArtifactData` with
 `action: "batch"`, `url` = the artifact URL, and `writes` = the array in that file (each entry already
-has `op`, `collection`, `doc_id`, `file_path` and, for documents that existed, `if_version`). If an
-entry fails because the document changed since step 2, re-read that document and write it again with
-`op: "update"` and the new version, so the owner's own edits are kept.
+has `op`, `collection`, `doc_id`, `file_path` and, for documents that existed, `if_version`). Documents
+that existed are written as `update` with only the fields this run changed, so they never undo what the
+owner changed meanwhile (for example a kill switch pressed during the run).
+
+A batch is all-or-nothing: if it is refused, nothing was written. Fix the entry the refusal names and
+send the **whole** batch again, until it commits (at most 5 tries, then report the error):
+- The document changed since step 2: set that entry's `if_version` to the current version the refusal
+  names. Do not change its file: it holds only this run's changes, which are safe to apply on top.
+- A `set` of a new document that now exists: `get` it, then change that entry to `op: "update"` with its
+  `if_version`.
 
 **9. Report** in a few lines: the cycle headline from `$WORK/out/summary.txt`, every order sent and its
 status, and anything that needs the owner (orders needing review, approvals waiting in the Robinhood

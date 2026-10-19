@@ -156,7 +156,7 @@ ${approvals?.length ? `Orders waiting for the owner's approval in the Robinhood 
 Market regime (computed): ${j(regime)}
 Scout's report: ${j(scout || { note: 'Scout unavailable this cycle' })}
 Analyst's report: ${j(analyst || { note: 'Analyst unavailable this cycle' })}
-Exit rules already triggered by code (these will be executed regardless): ${j(exitSignals || [])}
+Exit orders code already sent this cycle, before you were asked (do not close these again): ${j(exitSignals || [])}
 This week's calendar: ${j(weekEvents || [])}
 Current plan: ${j(plan || {})}
 Open buy/sell intentions from earlier cycles: ${j(intents || [])}
