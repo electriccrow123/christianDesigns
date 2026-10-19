@@ -282,3 +282,91 @@ test('Operator exit edits merge into the drafted plan; saved tickets keep exact 
   const saved = await store.get(`intents/${i.id}`);
   assert.deepEqual(saved.ticket, JSON.parse(JSON.stringify(i.ticket)));
 });
+
+function stubLive({ stocks, alerts = [], stocksValue } = {}) {
+  const placed = [];
+  const reviews = [];
+  const snap = () => ({
+    live: true,
+    account: { number: 'X1', optionLevel: 'option_level_3', type: 'cash' },
+    portfolio: { equity: 1000, buyingPower: 500, cash: 500, stocksValue: stocksValue ?? stocks.reduce((a, s) => a + s.value, 0), optionsValue: 0, dayChange: 0 },
+    stocks: structuredClone(stocks),
+    options: [],
+    orders: placed.map((t) => ({ id: 'o-' + t.id, refId: t.id, symbol: t.symbol, side: t.side, kind: t.kind, state: 'queued', createdAt: NOW.toISOString() })),
+    openOrders: [],
+  });
+  return {
+    placed,
+    reviews,
+    broker: {
+      live: true,
+      snapshot: async () => snap(),
+      account: async () => snap().account,
+      preview: async (t) => (reviews.push(t), { ok: !alerts.length, alerts }),
+      place: async (t) => (placed.push(t), { ok: true, state: 'queued', orderId: 'o-' + t.id }),
+      cancel: async () => ({ ok: true }),
+    },
+  };
+}
+const aaplPx = async () => (await fakeMarket().quotes(['AAPL']))[0].price;
+const heldAAPL = async () => [{ symbol: 'AAPL', qty: 1, available: 1, avgCost: 100, price: await aaplPx(), value: await aaplPx() }];
+
+test('live and paper books keep separate exit plans', async () => {
+  const { desk, store } = setup([]);
+  const live = stubLive({ stocks: [] });
+  const d = createDesk({ market: fakeMarket(), brokers: { paper: null, live: live.broker }, ai: scriptedAI([]), store, now: () => NOW });
+  await d.saveSettings({ broker: 'live' });
+  await d.setExitPlan('AAPL', { stop: 300, target: 400 });
+  await d.saveSettings({ broker: 'paper' });
+  assert.deepEqual(await d.getExits(), {});
+  await d.setExitPlan('AAPL', { stop: 1, target: 2 });
+  await d.saveSettings({ broker: 'live' });
+  assert.equal((await d.getExits()).AAPL.stop, 300);
+  assert.ok(store.docs.has('desk/exits') && store.docs.has('desk/exits-paper'));
+});
+
+test('an empty positions list next to a portfolio that holds stock deletes no plans', async () => {
+  const store = memStore();
+  const live = stubLive({ stocks: [], stocksValue: 14.6 });
+  const d = createDesk({ market: fakeMarket(), brokers: { paper: null, live: live.broker }, ai: scriptedAI([]), store, now: () => NOW });
+  await d.saveSettings({ broker: 'live', execution: 'auto' });
+  await d.setExitPlan('AAPL', { stop: 300, target: 400 });
+  await d.checkExits({ execute: true });
+  assert.equal((await d.getExits()).AAPL?.stop, 300);
+});
+
+test('an exit Robinhood flags is retried every half hour, not every minute', async () => {
+  const store = memStore();
+  const live = stubLive({ stocks: await heldAAPL(), alerts: ['Pattern day trade warning'] });
+  const d = createDesk({ market: fakeMarket(), brokers: { paper: null, live: live.broker }, ai: scriptedAI([]), store, now: () => NOW });
+  await d.saveSettings({ broker: 'live', execution: 'auto' });
+  await d.setExitPlan('AAPL', { stop: (await aaplPx()) * 1.01, target: 99999 });
+  for (let i = 0; i < 3; i++) await d.checkExits({ execute: true });
+  assert.equal(live.reviews.length, 1);
+  assert.equal((await d.listIntents()).filter((i) => i.status === 'needs_review').length, 1);
+});
+
+test('arming replaces a queued exit instead of waiting for the owner to press Send', async () => {
+  const store = memStore();
+  const live = stubLive({ stocks: await heldAAPL() });
+  const d = createDesk({ market: fakeMarket(), brokers: { paper: null, live: live.broker }, ai: scriptedAI([]), store, now: () => NOW });
+  await d.saveSettings({ broker: 'live', execution: 'confirm' });
+  await d.setExitPlan('AAPL', { stop: (await aaplPx()) * 1.01, target: 99999 });
+  const [queued] = await d.checkExits({ execute: true });
+  assert.equal(queued.status, 'queued');
+  await d.saveSettings({ execution: 'auto' });
+  const [sent] = await d.checkExits({ execute: true });
+  assert.equal(sent?.status, 'sent');
+  assert.equal((await store.get(`intents/${queued.id}`)).status, 'expired');
+  assert.equal(live.placed.length, 1);
+});
+
+test('a symbol stopped out this cycle is not bought back in the same cycle', async () => {
+  const { desk, store, paper } = setup([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x' }]);
+  await desk.runCycle('intraday');
+  await desk.setExitPlan('AAPL', { stop: (await aaplPx()) * 1.01, target: 99999 });
+  const d2 = createDesk({ market: fakeMarket(), brokers: { paper, live: null }, ai: scriptedAI([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 5, when: 'now', why: 'buy back' }]), store, now: () => NOW });
+  const cycle = await d2.runCycle('intraday');
+  assert.ok(cycle.messages.some((m) => /not traded again this cycle/.test(m.text)));
+  assert.equal((await d2.snapshot({ force: true })).stocks.length, 0);
+});

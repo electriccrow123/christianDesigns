@@ -3,7 +3,7 @@
 
 import { round, tickRound, uuid, saneQuote } from './util.js';
 import { MULTIPLIER, optionLevelNumber, STRATEGIES } from './options.js';
-import { daysBetween } from './market-clock.js';
+import { daysBetween, prevTradingDay } from './market-clock.js';
 
 const PDT_EQUITY = 25000;
 
@@ -349,7 +349,9 @@ export function evaluate(ticketIn, ctx) {
   // 8. Duplicates
   const side = t.kind === 'option' ? t.legs?.[0]?.side : t.side;
   const cid = t.kind === 'option' ? t.legs?.[0]?.contractId : null;
-  const dup = (ctx.openOrders || []).find((o) => o.symbol === t.symbol && (o.side === t.side || o.side === side) && OPEN_STATES.has(o.state) && (o.kind || 'stock') === t.kind && (!cid || !o.contractId || o.contractId === cid));
+  const OCC = /^[A-Z.]+\d{6}[CP]\d{8}$/;
+  const sameContract = (o) => !cid || !o.contractId || o.contractId === cid || OCC.test(cid) !== OCC.test(o.contractId); // ids in different formats: assume the same
+  const dup = (ctx.openOrders || []).find((o) => o.symbol === t.symbol && (o.side === t.side || o.side === side) && OPEN_STATES.has(o.state) && (o.kind || 'stock') === t.kind && sameContract(o));
   if (dup) block('duplicate', 'Duplicate order', `An open ${t.side} order for ${t.symbol} is already working.`);
 
   // 9. Pattern day trading guard
@@ -358,22 +360,29 @@ export function evaluate(ticketIn, ctx) {
     const closesSameDay = t.positionEffect === 'close' || (t.kind === 'stock' && t.side === 'sell');
     const openedToday = ctx.day?.openedTodaySymbols?.includes(t.symbol);
     const agent = t.meta?.agent !== false;
-    const ruleExit = /^Exit:/.test(t.why || '');
+    const ruleExit = !!t.meta?.exitRule;
     if (closesSameDay && openedToday && used >= 3) {
       const msg = `This would be day trade #${used + 1} in 5 business days on an account under $25k. Robinhood may restrict the account.`;
       if (agent && !ruleExit) block('pdt', 'Pattern day trading', `${msg} Hold overnight instead.`);
       else warn('pdt', 'Pattern day trading', `${msg} Sent anyway: ${ruleExit ? 'stop-loss and target exits always go out' : 'you placed it yourself'}.`);
     }
-    if (opening && agent && used >= 3) block('pdt', 'Pattern day trading', 'All 3 day trades for this 5-day window are used; a new position could not be stopped out today without a fourth.');
+    // Every position opened today that is still held could become a day trade if its stop fires, this one included.
+    const heldSym = (sym) => ctx.positions?.stocks?.some((x) => x.symbol === sym) || ctx.positions?.options?.some((o) => o.symbol === sym);
+    const atRisk = new Set([...(ctx.day?.openedTodaySymbols || []).filter(heldSym), ...Object.keys(ctx.pending || {}), t.symbol]);
+    if (opening && agent && used + atRisk.size > 3) block('pdt', 'Pattern day trading', `${used} of 3 day trades are used and ${atRisk.size} position(s) opened today could still be stopped out today; another entry could force a fourth.`);
     if (opening && t.kind === 'option' && t.legs.some((l) => l.dte === 0) && used >= 3) block('pdt', 'Pattern day trading', 'No day-trade allowance left this week, and a 0DTE trade would force one.');
     else if (used >= 2) pass('pdt', 'Pattern day trading', `${used} of 3 day trades used in the last 5 business days.`);
   }
 
   // 10. Exit plan
+  if (opening && t.exit?.timeStop && today && t.exit.timeStop <= today) {
+    warn('exit', 'Time stop', `Time stop ${t.exit.timeStop} is not after today, so it was dropped (it would sell the new position at once).`);
+    t.exit.timeStop = null;
+  }
   if (opening && ctx.limits?.requireExitPlan !== false) {
     const d = defaultExit(t, quote, p);
     if (!t.exit || (!t.exit.stop && !t.exit.target)) {
-      t.exit = d;
+      t.exit = { ...d, timeStop: t.exit?.timeStop || null };
       pass('exit', 'Exit plan', `Added default exit: stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
     } else {
       // Each side must exist and sit on the right side of the entry, or the mode's default replaces it.
@@ -387,6 +396,17 @@ export function evaluate(ticketIn, ctx) {
       if (!(t.exit.target > 0) || (ref > 0 && (long ? t.exit.target <= ref : t.exit.target >= ref))) {
         t.exit.target = d.target;
         fixed.push('target');
+      }
+      if (t.kind === 'option' && ref > 0) {
+        // A stock price written as an option exit would never trigger (or would fire at once).
+        if (t.exit.stop > ref * 5 && !fixed.includes('stop')) {
+          t.exit.stop = d.stop;
+          fixed.push('stop');
+        }
+        if (long && t.exit.target > ref * 20 && !fixed.includes('target')) {
+          t.exit.target = d.target;
+          fixed.push('target');
+        }
       }
       t.exit.basis = d.basis;
       if (fixed.length) warn('exit', 'Exit plan', `The ${fixed.join(' and ')} was missing or on the wrong side of the entry; used the mode's default. Stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
@@ -479,6 +499,7 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
           orderType: whole ? 'limit' : 'market', // fractional shares can only sell at market
           limitPrice: whole ? tickRound(px * 0.997, { direction: 'down' }) : null,
           why: `Exit: ${reason}.`,
+          meta: { exitRule: true },
         }),
       });
     }
@@ -510,6 +531,7 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
           strategy: long ? (o.right === 'call' ? 'long_call' : 'long_put') : o.right === 'call' ? 'covered_call' : 'cash_secured_put',
           legs: [{ contractId: o.id, right: o.right, strike: o.strike, expiration: o.expiration, side: long ? 'sell' : 'buy', positionEffect: 'close', bid: o.bid, ask: o.ask, mid: mark }],
           why: `Exit: ${reason}.`,
+          meta: { exitRule: true },
         }),
       });
     }
@@ -557,24 +579,35 @@ export function exposure(positions) {
 
 /** Count day trades (same-day open + close) in the last five business days from order history. */
 export function countDayTrades(orders, todayIso) {
-  const days = new Set();
+  // FINRA's window: today and the four trading days before it.
+  const window = new Set([todayIso]);
+  let d = todayIso;
+  for (let i = 0; i < 4; i++) window.add((d = prevTradingDay(d)));
   const byDay = {};
   for (const o of orders || []) {
     if (o.state !== 'filled' || !o.createdAt) continue;
-    const d = new Date(o.createdAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    if (daysBetween(d, todayIso) > 7) continue;
-    const key = `${d}|${o.symbol}|${o.kind}`;
-    (byDay[key] ||= { buy: 0, sell: 0 });
-    const opening = o.kind === 'option' ? o.positionEffect === 'open' : o.side === 'buy';
-    byDay[key][opening ? 'buy' : 'sell']++;
-    days.add(d);
+    const day = new Date(o.createdAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (!window.has(day)) continue;
+    (byDay[`${day}|${o.symbol}|${o.kind}`] ||= []).push(o);
   }
   let count = 0;
   const openedToday = [];
-  for (const [key, v] of Object.entries(byDay)) {
-    if (v.buy && v.sell) count += Math.min(v.buy, v.sell);
-    const [d, sym] = key.split('|');
-    if (d === todayIso && v.buy) openedToday.push(sym);
+  for (const [key, list] of Object.entries(byDay)) {
+    const [day, sym] = key.split('|');
+    // A day trade is a sale of something bought earlier the same day; selling older shares first is not.
+    let open = 0;
+    let bought = false;
+    for (const o of list.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))) {
+      const opening = o.kind === 'option' ? o.positionEffect === 'open' : o.side === 'buy';
+      if (opening) {
+        open++;
+        bought = true;
+      } else if (open > 0) {
+        open--;
+        count++;
+      }
+    }
+    if (day === todayIso && bought) openedToday.push(sym);
   }
   return { count, openedToday };
 }

@@ -26,9 +26,10 @@ below.
    `outbox.cancels`.
 6. If the desk is in paper mode, or `desk/settings` is missing, stop after step 2 and report why.
 7. Do not commit or push anything. The working folder is scratch space.
-8. Never run step 4 again once `out/outbox.json` exists: a new run would create new orders with new
-   `ref_id`s. If `run` says the cycle already finished, continue at step 6 with the orders in that file.
-9. Send nothing late: before each order, run `node crowsnest/bin/autopilot.mjs deadline $WORK`. Once it
+8. Never run step 4 again once `$WORK/out/outbox.json` exists, or step 3b once `$WORK/exits/out/outbox.json`
+   exists: a new run would create new orders with new `ref_id`s. If either command says it already ran,
+   continue at step 6 with the orders in that file.
+9. Send nothing late: before each order, run `node crowsnest/bin/autopilot.mjs deadline $B` (step 6). Once it
    says `"late": true`, do not review or place that order or any after it; record each as `failed` with
    the message `Too late to send`. The next check-in decides again with fresh prices.
 
@@ -76,11 +77,23 @@ that it is the account with `agentic_allowed: true`. Call:
 | `fundamentals` | `get_equity_fundamentals` (symbols = `settings.watchlist` plus every stock held, at most 10 per call) — an **array** with each call's `data` object |
 
 Write them to `$WORK/inputs/robinhood.json` as one object with those keys, each value being the
-tool result's `data` object exactly as returned.
+tool result's `data` object exactly as returned (`fundamentals` is a list of them). If a call fails,
+stop and report it: `run` and `exits` refuse a missing or malformed portfolio, positions or orders
+entry rather than mistake it for "nothing held".
 
-**4. Run the cycle.** `node crowsnest/bin/autopilot.mjs run $WORK`
+**3b. Stop-loss pass.** `node crowsnest/bin/autopilot.mjs exits $WORK`. It checks every position's exit
+plan against Robinhood's prices with no agents, so a triggered stop goes out within minutes of the
+check-in starting.
+- `"orders": 0` (or `"status": "skipped"`): go to step 4 in the same `$WORK`. Nothing from this pass is
+  written back; the full cycle redoes it.
+- One or more orders: send them now with step 6, using `B = $WORK/exits` (its outbox is
+  `$WORK/exits/out/outbox.json`). Then step 7 and step 8 with the same `B`. Positions have changed, so set
+  `WORK` to a new empty folder and repeat steps 2, 3 and 3b there. Do this at most twice, then go to
+  step 4.
+
+**4. Run the cycle.** `node crowsnest/bin/autopilot.mjs run $WORK <kind>`, with the `kind` from step 1.
 - Exit code **3** with `"status": "need_agents"`: go to step 5, then run this command again.
-- Exit code **0**: the cycle is complete; go to step 6.
+- Exit code **0**: the cycle is complete; go to step 6 with `B = $WORK`.
 - Exit code **1** saying the cycle already finished: go to step 6 (hard rule 8).
 - Any other exit code: report the error and stop.
 
@@ -94,7 +107,8 @@ tool result's `data` object exactly as returned.
 
 Check that each reply file holds a single valid JSON object, then repeat step 4.
 
-**6. Send the orders** in `$WORK/out/outbox.json` (`orders` and `cancels`; both may be empty).
+**6. Send the orders** in `$B/out/outbox.json` (`orders` and `cancels`; both may be empty). `B` is
+`$WORK/exits` in step 3b and `$WORK` after step 4.
 
 First re-check the owner's switches, which may have changed while the agents worked: `ArtifactData`
 `get` `desk/settings` and `desk/state`.
@@ -103,14 +117,17 @@ First re-check the owner's switches, which may have changed while the agents wor
 - If `killSwitch` is true: send only orders with `opening: false` (closing orders). Record each opening
   order as `failed` with the message `Kill switch is on`.
 
-Then, for each order you are sending:
+Then, for each order you are sending, first run `node crowsnest/bin/autopilot.mjs deadline $B`
+(hard rule 9), then:
 
 a. For each order's `legsToResolve` entry, call `get_option_instruments` with `chain_symbol`,
    `expiration_dates` = `expiration_date`, `strike_price`, `type`. Put the returned instrument's `id`
    into `input.legs[index].option_id`, and remember `occ → id`.
 b. Check the live price (rule 3): `get_equity_quotes` for stock orders, `get_option_quotes` for option
    legs.
-c. Call `review_tool` with `input` minus `ref_id`, plus the fields in `review_extra`.
+c. Call `review_tool` with `input` minus `ref_id`, plus the fields in `review_extra`. If the review call
+   errors, times out or returns no review, do not place: record `failed` with the error. Never place an
+   order whose review you did not see.
 d. If the review has alerts → result `needs_review`. Otherwise call `place_tool` with `input`
    (including `ref_id`). If the response says the customer must approve → `pending_approval`; if it
    placed → `sent`; if Robinhood refused it → `failed` with the message.
@@ -120,14 +137,14 @@ d. If the review has alerts → result `needs_review`. Otherwise call `place_too
    whose `ref_id` equals this order's `ref_id`: if found, record `sent` with its id; if not, `failed`.
 e. For each entry in `cancels`, call its `tool` with its `input`.
 
-Write `$WORK/results.json`: an array with one entry for **every** order in the outbox, sent or not
+Write `$B/results.json`: an array with one entry for **every** order in the outbox, sent or not
 (`finalize` refuses a file that leaves one out):
 `{"intentId": "...", "status": "sent|pending_approval|needs_review|failed", "orderId": "...", "alerts": [], "message": "", "optionIds": {"<occ>": "<robinhood id>"}}`.
 If there were no orders, write `[]`.
 
-**7. Finalize.** `node crowsnest/bin/autopilot.mjs finalize $WORK`
+**7. Finalize.** `node crowsnest/bin/autopilot.mjs finalize $B`
 
-**8. Write back.** For each `$WORK/out/writes-N.json` file (in order), call `ArtifactData` with
+**8. Write back.** For each `$B/out/writes-N.json` file (in order), call `ArtifactData` with
 `action: "batch"`, `url` = the artifact URL, and `writes` = the array in that file (each entry already
 has `op`, `collection`, `doc_id`, `file_path` and, for documents that existed, `if_version`). Documents
 that existed are written as `update` with only the fields this run changed, so they never undo what the
@@ -140,6 +157,7 @@ send the **whole** batch again, until it commits (at most 5 tries, then report t
 - A `set` of a new document that now exists: `get` it, then change that entry to `op: "update"` with its
   `if_version`.
 
-**9. Report** in a few lines: the cycle headline from `$WORK/out/summary.txt`, every order sent and its
+**9. Report** in a few lines: the cycle headline from `$WORK/out/summary.txt`, every order sent (in the
+stop-loss pass and the cycle) and its
 status, and anything that needs the owner (orders needing review, approvals waiting in the Robinhood
 app, errors).

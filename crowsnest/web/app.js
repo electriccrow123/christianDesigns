@@ -117,11 +117,13 @@ async function boot() {
   S.settings = await S.desk.getSettings();
   S.state = await S.desk.getState();
   S.plan = await S.desk.getPlan();
+  S.exits = await S.desk.getExits().catch(() => ({}));
   S.academy.progress = (await store.get('academy/progress').catch(() => null)) || {};
   S.ready = true;
   // Live updates (the background autopilot writes here too)
   store.watch?.(PATHS.settings, async () => {
     S.settings = await S.desk.getSettings();
+    S.exits = await S.desk.getExits(); // each book keeps its own exit plans
     renderAll();
   });
   store.watch?.(PATHS.state, async () => {
@@ -133,10 +135,12 @@ async function boot() {
     S.plan = await S.desk.getPlan();
     if (S.tab === 'planner' || S.tab === 'desk') renderTab();
   });
-  store.watch?.(PATHS.exits, (doc) => {
-    S.exits = doc?.plans || {};
-    if (S.tab === 'desk') renderDesk();
-  });
+  for (const path of [PATHS.exits, PATHS.exitsPaper]) {
+    store.watch?.(path, async () => {
+      S.exits = await S.desk.getExits();
+      if (S.tab === 'desk') renderDesk();
+    });
+  }
   store.watch?.(PATHS.equity, (doc) => {
     S.equity = doc || { live: [], paper: [] };
     if (S.tab === 'desk') drawEquity();

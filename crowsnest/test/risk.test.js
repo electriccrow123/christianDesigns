@@ -179,7 +179,12 @@ test('pattern day trading: agent entries and agent same-day closes block at 3 da
   const held = { stocks: [{ symbol: 'AAPL', qty: 2, available: 2, value: 400 }], options: [] };
   assert.equal(evaluate({ symbol: 'SPY', side: 'buy', quantity: 1, conviction: 4, meta: { agent: true } }, ctx({ day, account })).decision, 'block');
   assert.equal(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true }, why: 'trim' }, ctx({ day, account, positions: held })).decision, 'block');
-  assert.notEqual(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true }, why: 'Exit: price hit the stop.' }, ctx({ day, account, positions: held })).decision, 'block');
+  assert.notEqual(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true, exitRule: true }, why: 'Exit: price hit the stop.' }, ctx({ day, account, positions: held })).decision, 'block');
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true }, why: 'Exit: thesis broken' }, ctx({ day, account, positions: held })).decision, 'block'); // text alone is not a rule exit
+  // 2 used and a position opened today still held: another entry could force a fourth
+  const day2 = { ...day, dayTradesRolling: 2 };
+  assert.equal(evaluate({ symbol: 'SPY', side: 'buy', quantity: 1, conviction: 4, meta: { agent: true } }, ctx({ day: day2, account, positions: held })).decision, 'block');
+  assert.notEqual(evaluate({ symbol: 'SPY', side: 'buy', quantity: 1, conviction: 4, meta: { agent: true } }, ctx({ day: { ...day2, openedTodaySymbols: [] }, account, positions: held })).decision, 'block');
 });
 
 test('spreads and calendars do not open; unknown market cap blocks agent entries', () => {
@@ -212,4 +217,22 @@ test('fractional quantities are floored to 6 decimals; option exits price toward
   const positions = { stocks: [], options: [{ id: 'o1', symbol: 'AAPL', right: 'call', strike: 200, expiration: '2026-11-20', qty: 1, avgPrice: 5, mark: 3.9, bid: 3.83, ask: 3.97 }] };
   const [sig] = exitSignals({ positions, plans: { o1: { stop: 4, target: 9 } }, quotes: {}, params: resolveParams('balanced'), todayIso: '2026-10-19' });
   assert.ok(sig.ticket.price <= 3.83, `price ${sig.ticket.price}`);
+});
+
+test('day trades: only today and the 4 trading days before count, and selling older shares first is not one', () => {
+  const at = (iso, hh) => new Date(`${iso}T${hh}:00:00-04:00`).toISOString();
+  const rt = (iso) => [{ state: 'filled', createdAt: at(iso, '10'), symbol: 'X', kind: 'stock', side: 'buy' }, { state: 'filled', createdAt: at(iso, '14'), symbol: 'X', kind: 'stock', side: 'sell' }];
+  const orders = [...rt('2026-10-12'), ...rt('2026-10-14'), ...rt('2026-10-16')];
+  assert.equal(countDayTrades(orders, '2026-10-19').count, 2); // Oct 12 is outside the window
+  const sellFirst = [{ state: 'filled', createdAt: at('2026-10-19', '10'), symbol: 'COIN', kind: 'stock', side: 'sell' }, { state: 'filled', createdAt: at('2026-10-19', '14'), symbol: 'COIN', kind: 'stock', side: 'buy' }];
+  const r = countDayTrades(sellFirst, '2026-10-19');
+  assert.equal(r.count, 0);
+  assert.deepEqual(r.openedToday, ['COIN']);
+});
+
+test('option exits written as stock prices are replaced; past time stops are dropped', () => {
+  const r = evaluate({ ...longCall(), exit: { stop: 180, target: 400 } }, ctx());
+  assert.ok(r.ticket.exit.stop < 4.2 && r.ticket.exit.target < 20, JSON.stringify(r.ticket.exit));
+  const past = evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: 4, exit: { stop: 190, target: 220, timeStop: '2026-10-15' } }, ctx());
+  assert.equal(past.ticket.exit.timeStop, null);
 });

@@ -8,6 +8,7 @@
 //
 // Commands
 //   node bin/autopilot.mjs slot                 which check-in is due now (JSON)
+//   node bin/autopilot.mjs exits <dir>          the stop-loss pass: rule exits only, no agents (<dir>/exits/out)
 //   node bin/autopilot.mjs run <dir> [kind]     run or resume a cycle (refuses once out/outbox.json exists; --force overrides)
 //   node bin/autopilot.mjs deadline <dir>       whether the outbox may still be sent (JSON: now, sendBy, late)
 //   node bin/autopilot.mjs finalize <dir>       apply <dir>/results.json and rebuild the writes
@@ -170,15 +171,22 @@ async function robinhoodState(dir, settings) {
   const oq = mapOptionQuotes(rh.optionQuotes);
   const optionQuotes = Object.fromEntries(Object.keys({ ...meta, ...oq }).map((id) => [id, { ...meta[id], ...oq[id] }]));
   const list = (x, key) => (Array.isArray(x) ? x : x?.[key] || []);
+  // Positions and orders must be the tool's data object: a wrong or empty save would look like "nothing held".
+  const must = (x, key, name) => {
+    if (Array.isArray(x)) return x;
+    if (x && Array.isArray(x[key])) return x[key];
+    throw new Error(`robinhood.json "${name}" must be the ${name === 'portfolio' ? '' : 'tool result\'s '}data object with a "${key}" list (AUTOPILOT.md step 3). Save it again; nothing was traded.`);
+  };
+  if (!rh.portfolio || rh.portfolio.total_value == null) throw new Error('robinhood.json "portfolio" is missing total_value (AUTOPILOT.md step 3). Save it again; nothing was traded.');
   const snap = buildSnapshot({
     account,
     portfolio: rh.portfolio,
-    stockPositions: list(rh.equityPositions, 'positions'),
-    optionPositions: list(rh.optionPositions, 'positions'),
+    stockPositions: must(rh.equityPositions, 'positions', 'equityPositions'),
+    optionPositions: must(rh.optionPositions, 'positions', 'optionPositions'),
     quotes,
     optionQuotes,
-    equityOrders: list(rh.equityOrders, 'orders'),
-    optionOrders: list(rh.optionOrders, 'orders'),
+    equityOrders: must(rh.equityOrders, 'orders', 'equityOrders'),
+    optionOrders: must(rh.optionOrders, 'orders', 'optionOrders'),
     approvals: list(rh.approvals, 'approvals'),
     pnlTrades: list(rh.pnl, 'trades'),
   });
@@ -186,7 +194,7 @@ async function robinhoodState(dir, settings) {
   for (const payload of [].concat(rh.fundamentals || [])) {
     for (const [sym, f] of Object.entries(mapFundamentals(payload))) fundamentals[sym] = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== undefined));
   }
-  return { account, snap, fundamentals };
+  return { account, snap, fundamentals, quotes };
 }
 
 // ------------------------------------------------------------------ exports for ArtifactData
@@ -220,21 +228,26 @@ async function exportWrites(dir, store, versions, original = {}) {
   return { count: entries.length, batches: batches.length };
 }
 
-// ------------------------------------------------------------------ run
-async function run(dir, kind) {
-  if (existsSync(join(dir, 'out', 'outbox.json')) && !force) {
-    throw new Error(`This cycle already finished: ${join(dir, 'out', 'outbox.json')} exists. Continue at step 6 with those same orders and ref_ids; never run the cycle again (that would create new orders).`);
-  }
+// ------------------------------------------------------------------ shared setup for a pass
+const defined = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v !== undefined && v !== null));
+
+async function prepare(dir, { cacheMarket }) {
   const { docs, versions, original } = await loadDocs(dir);
   const store = memoryStore(docs);
   const settingsDoc = docs[PATHS.settings] || {};
-  if (settingsDoc.broker !== 'live') {
-    console.log(JSON.stringify({ status: 'skipped', reason: 'The desk is in paper mode; the background autopilot only trades the live account.' }));
-    return;
-  }
-  const { snap, fundamentals: rhFund } = await robinhoodState(dir, settingsDoc);
-  const market = await cachedMarket(createYahooMarket({ watchlist: () => settingsDoc.watchlist || [] }), join(dir, 'cache', 'market.json'));
-  // Robinhood's fundamentals (market cap above all) win over Yahoo's, which can fail without a cookie.
+  if (settingsDoc.broker !== 'live') return { skipped: 'The desk is in paper mode; the background autopilot only trades the live account.' };
+  const { snap, fundamentals: rhFund, quotes: rhQuotes } = await robinhoodState(dir, settingsDoc);
+  const yahoo = createYahooMarket({ watchlist: () => settingsDoc.watchlist || [] });
+  const market = cacheMarket ? await cachedMarket(yahoo, join(dir, 'cache', 'market.json')) : { ...yahoo, save: async () => {} };
+  // Robinhood's own data wins: its quotes for the symbols it priced (every holding), and its fundamentals
+  // (market cap above all), since Yahoo's quote endpoint can fail without a cookie.
+  const yahooQuotes = market.quotes;
+  market.quotes = async (symbols) => {
+    const y = (await yahooQuotes(symbols).catch(() => [])) || [];
+    const out = y.map((q) => (rhQuotes[q.symbol]?.price > 0 ? { ...q, ...defined(rhQuotes[q.symbol]) } : q));
+    for (const sym of symbols) if (rhQuotes[sym]?.price > 0 && !out.some((q) => q.symbol === sym)) out.push({ ...defined(rhQuotes[sym]), symbol: sym });
+    return out;
+  };
   const yahooFundamentals = market.fundamentals;
   market.fundamentals = async (symbols) => {
     const y = (await yahooFundamentals(symbols).catch(() => ({}))) || {};
@@ -260,6 +273,94 @@ async function run(dir, kind) {
       return { ok: true };
     },
   };
+  return { store, versions, original, settingsDoc, snap, market, broker, outbox, cancels };
+}
+
+/** Write <base>/out: the outbox for the session to send, the state finalize needs, and the database writes. */
+async function writeOutputs(base, c, { cycleId = null, head = [], lines = [] }) {
+  const { store, snap, market, outbox, cancels, versions, original } = c;
+  const accountNumber = snap.account.number;
+  // Send nothing after this: prices go stale, and a market order sent after the close would run at the next open.
+  const st = marketStatus(new Date());
+  const sendBy = new Date(Date.now() + (st.session === 'regular' ? Math.min(15, Math.max(0, st.minutesToClose - 1)) : 10) * 60000).toISOString();
+  const orders = [];
+  for (const t of outbox) {
+    const path = `${PATHS.intents}/${t.id}`;
+    // Marked "sending" until finalize records what Robinhood said.
+    if (store.docs[path]) await store.update(path, { status: 'sending', updatedAt: Date.now() });
+    const isOption = t.kind === 'option';
+    const input = { ...(isOption ? optionInput(t, accountNumber) : equityInput(t, accountNumber)), ref_id: t.id };
+    const opening = t.positionEffect === 'open' && !(t.kind === 'stock' && t.side === 'sell');
+    const lastPx = snap.stocks.find((x) => x.symbol === t.symbol)?.price ?? (await market.quotes([t.symbol]).catch(() => []))[0]?.price ?? null;
+    // The price the order was gated against: a single option leg's natural price, a stock's limit or last price.
+    const leg = isOption && t.legs.length === 1 ? t.legs[0] : null;
+    const refPrice = isOption ? (leg ? (leg.side === 'buy' ? leg.ask : leg.bid) || t.price || null : null) : t.limitPrice ?? lastPx;
+    orders.push({
+      intentId: t.id,
+      headline: store.docs[path]?.headline,
+      kind: t.kind,
+      symbol: t.symbol,
+      review_tool: isOption ? 'review_option_order' : 'review_equity_order',
+      place_tool: isOption ? 'place_option_order' : 'place_equity_order',
+      review_extra: isOption ? { chain_symbol: t.symbol, underlying_type: 'equity' } : {},
+      input,
+      opening, // false = closes a position: still sent when the kill switch is on, and exempt from the price check
+      refPrice,
+      legsToResolve: isOption ? t.legs.map((l, index) => ({ index, occ: l.contractId, chain_symbol: t.symbol, expiration_date: l.expiration, strike_price: Number(l.strike).toFixed(4), type: l.right })).filter((l) => OCC.test(l.occ)) : [],
+    });
+  }
+  await writeJson(join(base, 'out', 'outbox.json'), { accountNumber, sendBy, orders, cancels: cancels.map((o) => ({ tool: o.kind === 'option' ? 'cancel_option_order' : 'cancel_equity_order', input: { account_number: accountNumber, order_id: o.id }, symbol: o.symbol })) });
+  const dirtyPaths = [...store.dirty];
+  await writeJson(join(base, 'out', 'state.json'), { docs: Object.fromEntries(dirtyPaths.map((p) => [p, store.docs[p] ?? null])), versions, original: Object.fromEntries(dirtyPaths.filter((p) => original[p]).map((p) => [p, original[p]])), cycleId });
+  const w = await exportWrites(base, store, versions, original);
+  const summary = [...head, ...lines, `Orders to send: ${orders.length}. Cancels: ${cancels.length}. Documents to write: ${w.count} in ${w.batches} batch file(s).`].join('\n');
+  await writeFile(join(base, 'out', 'summary.txt'), summary);
+  return { orders: orders.length, cancels: cancels.length, summary };
+}
+
+const noAI = {
+  available: false,
+  json: async () => {
+    throw new Error('The exit pass uses no agents.');
+  },
+  text: async () => {
+    throw new Error('The exit pass uses no agents.');
+  },
+};
+
+// ------------------------------------------------------------------ exits: the stop-loss pass, before any agent
+async function exitsPass(dir) {
+  const base = join(dir, 'exits');
+  if (existsSync(join(base, 'out', 'outbox.json')) && !force) {
+    throw new Error(`The exit pass already ran: ${join(base, 'out', 'outbox.json')} exists. Send those orders (step 3b); never run it again in this folder.`);
+  }
+  const c = await prepare(dir, { cacheMarket: false });
+  if (c.skipped) {
+    console.log(JSON.stringify({ status: 'skipped', reason: c.skipped }));
+    return;
+  }
+  const desk = createDesk({ market: c.market, brokers: { live: c.broker, paper: c.broker }, ai: noAI, store: c.store, log: (...a) => console.error('[desk]', ...a) });
+  await desk.reconcile(c.snap); // finished or stale orders must not block today's exits
+  const exits = await desk.checkExits({ execute: true, snap: c.snap });
+  const out = await writeOutputs(base, c, { head: ['Exit pass (rules only, no agents)'], lines: exits.map((e) => `- ${e.symbol}: ${e.status} — ${e.gate?.summary || ''}`) });
+  console.log(JSON.stringify({ status: 'exits', orders: out.orders, outbox: resolve(join(base, 'out', 'outbox.json')), summary: out.summary }, null, 2));
+}
+
+// ------------------------------------------------------------------ run: the full cycle with the agents
+async function run(dir, kind) {
+  if (existsSync(join(dir, 'out', 'outbox.json')) && !force) {
+    throw new Error(`This cycle already finished: ${join(dir, 'out', 'outbox.json')} exists. Continue at step 6 with those same orders and ref_ids; never run the cycle again (that would create new orders).`);
+  }
+  const early = await readJson(join(dir, 'exits', 'out', 'outbox.json'));
+  if (early?.orders?.length && !force) {
+    throw new Error(`The stop-loss pass in this folder sent orders, so its positions are out of date. Start a new WORK folder and repeat steps 2, 3 and 3b there (AUTOPILOT.md step 3b).`);
+  }
+  await writeJson(join(dir, 'cache', 'kind.json'), { kind }); // resumes keep the check-in's kind, whatever the clock says then
+  const c = await prepare(dir, { cacheMarket: true });
+  if (c.skipped) {
+    console.log(JSON.stringify({ status: 'skipped', reason: c.skipped }));
+    return;
+  }
   const agentsDir = join(dir, 'agents');
   const promptsDir = join(dir, 'prompts');
   const ai = {
@@ -279,54 +380,21 @@ async function run(dir, kind) {
       throw new Error('Text replies are not used by the autopilot.');
     },
   };
-  const desk = createDesk({ market, brokers: { live: broker, paper: broker }, ai, store, log: (...a) => console.error('[desk]', ...a) });
+  const desk = createDesk({ market: c.market, brokers: { live: c.broker, paper: c.broker }, ai, store: c.store, log: (...a) => console.error('[desk]', ...a) });
   const cycle = await desk.runCycle(kind, { source: 'autopilot', prune: false });
-  await market.save();
+  await c.market.save();
   if (cycle.status === 'paused') {
     const need = ['scout', 'analyst', 'honcho', 'operator'].filter((a) => existsSync(join(promptsDir, `${a}.txt`)) && !existsSync(join(agentsDir, `${a}.json`)));
     console.log(JSON.stringify({ status: 'need_agents', agents: need, prompts: need.map((a) => resolve(join(promptsDir, `${a}.txt`))), replies: need.map((a) => resolve(join(agentsDir, `${a}.json`))) }, null, 2));
     process.exitCode = 3;
     return;
   }
-  // Orders the cycle wants sent: mark their intents "sending" until finalize records the outcome.
-  const accountNumber = snap.account.number;
-  // Send nothing after this: prices go stale, and a market order sent after the close would run at the next open.
-  const st = marketStatus(new Date());
-  const sendBy = new Date(Date.now() + (st.session === 'regular' ? Math.min(15, Math.max(0, st.minutesToClose - 1)) : 10) * 60000).toISOString();
-  const orders = [];
-  for (const t of outbox) {
-    const path = `${PATHS.intents}/${t.id}`;
-    if (store.docs[path]) await store.update(path, { status: 'sending', updatedAt: Date.now() });
-    const isOption = t.kind === 'option';
-    const input = { ...(isOption ? optionInput(t, accountNumber) : equityInput(t, accountNumber)), ref_id: t.id };
-    const opening = t.positionEffect === 'open' && !(t.kind === 'stock' && t.side === 'sell');
-    const lastPx = snap.stocks.find((x) => x.symbol === t.symbol)?.price ?? (await market.quotes([t.symbol]).catch(() => []))[0]?.price ?? null;
-    orders.push({
-      intentId: t.id,
-      headline: store.docs[path]?.headline,
-      kind: t.kind,
-      symbol: t.symbol,
-      review_tool: isOption ? 'review_option_order' : 'review_equity_order',
-      place_tool: isOption ? 'place_option_order' : 'place_equity_order',
-      review_extra: isOption ? { chain_symbol: t.symbol, underlying_type: 'equity' } : {},
-      input,
-      opening, // false = closes a position: still sent when the kill switch is on, and exempt from the price check
-      refPrice: isOption ? t.price : t.limitPrice ?? lastPx,
-      legsToResolve: isOption ? t.legs.map((l, index) => ({ index, occ: l.contractId, chain_symbol: t.symbol, expiration_date: l.expiration, strike_price: Number(l.strike).toFixed(4), type: l.right })).filter((l) => OCC.test(l.occ)) : [],
-    });
-  }
-  await writeJson(join(dir, 'out', 'outbox.json'), { accountNumber, sendBy, orders, cancels: cancels.map((o) => ({ tool: o.kind === 'option' ? 'cancel_option_order' : 'cancel_equity_order', input: { account_number: accountNumber, order_id: o.id }, symbol: o.symbol })) });
-  const dirtyPaths = [...store.dirty];
-  await writeJson(join(dir, 'out', 'state.json'), { docs: Object.fromEntries(dirtyPaths.map((p) => [p, store.docs[p] ?? null])), versions, original: Object.fromEntries(dirtyPaths.filter((p) => original[p]).map((p) => [p, original[p]])), cycleId: cycle.id });
-  const w = await exportWrites(dir, store, versions, original);
-  const summary = [
-    `Cycle ${cycle.id} (${cycle.kind}) ${cycle.status}: ${cycle.headline || cycle.error || ''}`,
-    cycle.summary || '',
-    ...(cycle.results || []).map((r) => `- ${r.symbol}: ${r.status} — ${r.summary}`),
-    `Orders to send: ${orders.length}. Cancels: ${cancels.length}. Documents to write: ${w.count} in ${w.batches} batch file(s).`,
-  ].join('\n');
-  await writeFile(join(dir, 'out', 'summary.txt'), summary);
-  console.log(summary);
+  const out = await writeOutputs(dir, c, {
+    cycleId: cycle.id,
+    head: [`Cycle ${cycle.id} (${cycle.kind}) ${cycle.status}: ${cycle.headline || cycle.error || ''}`, cycle.summary || ''],
+    lines: (cycle.results || []).map((r) => `- ${r.symbol}: ${r.status} — ${r.summary}`),
+  });
+  console.log(out.summary);
 }
 
 // ------------------------------------------------------------------ finalize
@@ -380,8 +448,9 @@ async function finalize(dir) {
 
 try {
   if (cmd === 'slot') console.log(JSON.stringify(dueKind()));
+  else if (cmd === 'exits' && dirArg) await exitsPass(resolve(dirArg));
   else if (cmd === 'run' && dirArg) {
-    const kind = kindArg || dueKind().kind;
+    const kind = kindArg || (await readJson(join(resolve(dirArg), 'cache', 'kind.json')))?.kind || dueKind().kind;
     if (kind === 'none') console.log(JSON.stringify({ status: 'skipped', reason: 'Market closed today.' }));
     else await run(resolve(dirArg), kind);
   } else if (cmd === 'deadline' && dirArg) {
@@ -391,7 +460,7 @@ try {
     console.log(JSON.stringify({ now: new Date().toISOString(), sendBy: box.sendBy || null, late }));
   } else if (cmd === 'finalize' && dirArg) await finalize(resolve(dirArg));
   else {
-    console.error('Usage: node bin/autopilot.mjs slot | run <dir> [kind] | deadline <dir> | finalize <dir>');
+    console.error('Usage: node bin/autopilot.mjs slot | exits <dir> | run <dir> [kind] | deadline <dir> | finalize <dir>');
     process.exitCode = 2;
   }
 } catch (err) {

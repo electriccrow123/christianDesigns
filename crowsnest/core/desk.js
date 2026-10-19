@@ -35,7 +35,8 @@ const P = {
   settings: 'desk/settings',
   state: 'desk/state',
   plan: 'desk/plan',
-  exits: 'desk/exits',
+  exits: 'desk/exits', // live book
+  exitsPaper: 'desk/exits-paper', // paper book: kept apart so switching books never touches live plans
   equity: 'desk/equity',
   cycles: 'cycles',
   intents: 'intents',
@@ -72,38 +73,55 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const p = (await store.get(P.plan).catch(() => null)) || {};
     return { week: p.week || emptyWeekPlan(todayNY(now())), today: p.today || emptyDayPlan(todayNY(now())), updatedAt: p.updatedAt || null };
   }
+  async function exitsPath() {
+    return (await getSettings()).broker === 'live' ? P.exits : P.exitsPaper;
+  }
   async function getExits() {
-    return (await store.get(P.exits).catch(() => null))?.plans || {};
+    return (await store.get(await exitsPath()).catch(() => null))?.plans || {};
+  }
+  async function saveExits(plans) {
+    await store.set(await exitsPath(), { plans });
   }
   async function setExitPlan(key, plan) {
     const plans = await getExits();
     if (plan) plans[key] = { ...plans[key], ...plan, updatedAt: Date.now() };
     else delete plans[key];
-    await store.set(P.exits, { plans });
+    await saveExits(plans);
     return plans;
   }
 
-  /** Drop exit plans for positions that are gone (or that belong to the other book), keeping plans of orders still working. */
+  /** Drop exit plans for positions that are gone, keeping plans of orders still working. */
   async function pruneExitPlans(snap, intents) {
     const plans = await getExits();
     const held = new Set([...snap.stocks.map((s) => s.symbol), ...snap.options.map((o) => o.id)]);
     const working = new Set(intents.filter((i) => ORDER_LIVE.has(i.status) || i.status === 'queued').map((i) => i.id));
+    // An empty list next to a portfolio that says something is held is a bad payload, not a sale.
+    const stocksTrusted = snap.stocks.length > 0 || !(snap.portfolio?.stocksValue > 0.01);
+    const optionsTrusted = snap.options.length > 0 || !(snap.portfolio?.optionsValue > 0.01);
     let changed = false;
     for (const [k, p] of Object.entries(plans)) {
-      const otherBook = p?.live != null && p.live !== !!snap.live;
-      if (otherBook || (!held.has(k) && !(p?.intentId && working.has(p.intentId)))) {
+      const isOption = p?.basis === 'option_premium' || k.includes('|') || /^[A-Z.]+\d{6}[CP]\d{8}$/.test(k) || /^[0-9a-f-]{36}$/.test(k);
+      if (!(isOption ? optionsTrusted : stocksTrusted)) continue;
+      if (!held.has(k) && !(p?.intentId && working.has(p.intentId))) {
         delete plans[k];
         changed = true;
       }
     }
-    if (changed) await store.set(P.exits, { plans });
+    if (changed) await saveExits(plans);
     return plans;
   }
-  /** Whether an existing intent already covers this exit (an order working, or one queued today for the owner). */
-  function blocksExit(i, ticket) {
+  const keyOf = (ticket) => ticket.legs?.[0]?.contractId || ticket.symbol;
+  /** Whether an existing intent already covers this exit: an order working, a recent Robinhood review alert, or one queued for the owner. */
+  function blocksExit(i, ticket, sendMode) {
     if (i.source !== 'exit' || i.symbol !== ticket.symbol) return false;
     if ((i.ticket?.legs?.[0]?.contractId || null) !== (ticket.legs?.[0]?.contractId || null)) return false;
-    return ORDER_LIVE.has(i.status) || (i.status === 'queued' && todayNY(new Date(i.createdAt)) === todayNY(now()));
+    if (ORDER_LIVE.has(i.status)) return true;
+    if (i.status === 'needs_review') return Date.now() - (i.updatedAt || i.createdAt || 0) < 30 * 60 * 1000; // retry at most every half hour
+    return i.status === 'queued' && sendMode !== 'auto' && todayNY(new Date(i.createdAt)) === todayNY(now());
+  }
+  /** When an exit goes out automatically, a copy still waiting for the owner's Send must not be sent too. */
+  async function supersedeQueued(intents, ticket) {
+    for (const i of intents) if (i.source === 'exit' && i.status === 'queued' && i.symbol === ticket.symbol && (i.ticket?.legs?.[0]?.contractId || null) === (ticket.legs?.[0]?.contractId || null)) await saveIntent({ ...i, status: 'expired', vetoReason: 'Replaced by an exit sent automatically.' });
   }
 
   async function brokerFor(settings) {
@@ -378,7 +396,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const e = { ...(t.exit || {}) };
       if (Number(op.exit.stop) > 0) e.stop = Number(op.exit.stop);
       if (Number(op.exit.target) > 0) e.target = Number(op.exit.target);
-      if (op.exit.timeStop !== undefined) e.timeStop = isoDate(op.exit.timeStop);
+      const ts = isoDate(op.exit.timeStop);
+      if (ts) e.timeStop = ts; // null or junk keeps the drafted date
       if (Object.keys(e).length) t.exit = e;
     }
     if (op.note) t.meta.operatorNote = String(op.note).slice(0, 400);
@@ -502,7 +521,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     } catch (err) {
       result.status = 'failed';
       // A dropped connection while placing does not prove the order was not placed.
-      const uncertain = placing && err?.code !== 'tool_error' && err?.code !== 'cancelled';
+      const uncertain = placing && ['server_unavailable', 'upstream_error'].includes(err?.code);
+      if (uncertain) reserve(); // it may be live: later tickets this cycle must count it
       result.broker = { message: uncertain ? `${err?.message || 'No reply from Robinhood.'} The order may still have gone through; the desk will check Robinhood's order list.` : err?.message || String(err), code: err?.code, uncertain };
     }
     return result;
@@ -576,7 +596,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const kept = await pruneExitPlans(snap, intents);
       const adopted = adoptionPlans({ positions: snap, plans: kept, quotes, params });
       if (Object.keys(adopted).length) {
-        await store.set(P.exits, { plans: { ...kept, ...Object.fromEntries(Object.entries(adopted).map(([k, p]) => [k, { ...p, live: !!snap.live, updatedAt: Date.now() }])) } });
+        await saveExits({ ...kept, ...Object.fromEntries(Object.entries(adopted).map(([k, p]) => [k, { ...p, live: !!snap.live, updatedAt: Date.now() }])) });
         say('system', 'Adopted positions', Object.entries(adopted).map(([k, p]) => `${snap.options.find((o) => o.id === k) ? contractLabel(snap.options.find((o) => o.id === k)) : k}: stop ${p.stop}, target ${p.target}`).join('\n'));
       }
       // Deterministic exits go out first, before any agent runs, so an AI failure can never hold back a stop.
@@ -585,9 +605,10 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const pending = newPending();
       const results = [];
       const exitPlans = await getExits();
-      const exits = exitSignals({ positions: snap, plans: exitPlans, quotes, params, todayIso: clock.iso, clock }).filter((e) => !intents.some((i) => blocksExit(i, e.ticket)));
+      const exits = exitSignals({ positions: snap, plans: exitPlans, quotes, params, todayIso: clock.iso, clock }).filter((e) => !intents.some((i) => blocksExit(i, e.ticket, sendMode)));
       if (exits.length) say('system', 'Exit rules triggered', exits.map((e) => `${e.ticket.symbol}: ${e.reason}`).join('\n'));
-      const exitKeys = new Set(exits.map((e) => e.ticket.legs?.[0]?.contractId || e.ticket.symbol));
+      // Positions being closed by an exit (this cycle, or an exit order still working) are not traded again this cycle.
+      const exitKeys = new Set([...exits.map((e) => keyOf(e.ticket)), ...intents.filter((i) => i.source === 'exit' && ORDER_LIVE.has(i.status) && i.ticket).map((i) => keyOf(i.ticket))]);
       const record = async (item, { params: p, research = {} }) => {
         const d = item.decision;
         const intent = {
@@ -636,7 +657,10 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         results.push({ intentId: intent.id, symbol: d.symbol, status: r.status, gate: r.gate.decision, summary: r.gate.summary, broker: r.broker });
         say('gate', `${r.gate.decision === 'block' ? 'Blocked' : r.gate.decision === 'resize' ? 'Resized' : 'Approved'}: ${intent.headline}`, `${r.gate.summary}${r.status !== 'blocked' ? `\nStatus: ${statusText(r.status)}${r.broker?.message ? ` — ${r.broker.message}` : ''}` : ''}`);
       };
-      for (const e of exits) await record({ kind: 'exit', reason: e.reason, ticket: e.ticket, decision: { id: `exit-${e.ticket.symbol}`, action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, conviction: 5 } }, { params });
+      for (const e of exits) {
+        if (sendMode === 'auto') await supersedeQueued(intents, e.ticket);
+        await record({ kind: 'exit', reason: e.reason, ticket: e.ticket, decision: { id: `exit-${e.ticket.symbol}`, action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, conviction: 5 } }, { params });
+      }
       abort();
 
       // 2. Researchers in parallel
@@ -764,8 +788,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       const drafts = [];
       const nonTrade = [];
       for (const d of decisions) {
-        if (['close', 'trim'].includes(d.action) && exitKeys.has(d.contractId || d.symbol)) {
-          say('system', `Skipped ${d.symbol}`, `An exit rule already closed ${d.symbol} this cycle.`);
+        if (['open', 'close', 'trim'].includes(d.action) && exitKeys.has(d.contractId || d.symbol)) {
+          say('system', `Skipped ${d.symbol}`, `An exit rule is closing ${d.symbol}, so it is not traded again this cycle.`);
           continue;
         }
         if (['open', 'close', 'trim'].includes(d.action) && d.when !== 'on_trigger') {
@@ -1032,18 +1056,19 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const adopted = adoptionPlans({ positions: snap, plans, quotes, params });
     if (Object.keys(adopted).length) {
       plans = { ...plans, ...Object.fromEntries(Object.entries(adopted).map(([k, p]) => [k, { ...p, live: !!snap.live, updatedAt: Date.now() }])) };
-      await store.set(P.exits, { plans });
+      await saveExits(plans);
     }
     const exits = exitSignals({ positions: snap, plans, quotes, params, todayIso: todayNY(now()), clock: marketStatus(now()) });
     const out = [];
     const pending = newPending();
+    const live = settings.broker === 'live';
+    const sendMode = !live ? 'auto' : execute && settings.execution === 'auto' ? 'auto' : 'queue';
     for (const e of exits) {
-      if (recent.some((i) => blocksExit(i, e.ticket))) continue;
+      if (recent.some((i) => blocksExit(i, e.ticket, sendMode))) continue;
+      if (sendMode === 'auto') await supersedeQueued(recent, e.ticket);
       const intent = { id: uuid(), createdAt: Date.now(), source: 'exit', action: 'close', symbol: e.ticket.symbol, why: `Exit rule: ${e.reason}`, live: settings.broker === 'live', mode: params.mode.id };
       e.ticket.id = intent.id;
       e.ticket.meta = { ...e.ticket.meta, intentId: intent.id, agent: true };
-      const live = settings.broker === 'live';
-      const sendMode = !live ? 'auto' : execute && settings.execution === 'auto' ? 'auto' : 'queue';
       const r = await processTicket(e.ticket, { settings, state, snap, params, quotes, sendMode, pending });
       Object.assign(intent, { ticket: r.gate.ticket, gate: { decision: r.gate.decision, summary: r.gate.summary, checks: r.gate.checks, cost: r.gate.cost }, status: r.status, broker: r.broker, headline: headlineFor(r.gate.ticket, intent) });
       await saveIntent(intent);
@@ -1244,6 +1269,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     patchState,
     getPlan,
     getExits,
+    exitsPath,
     setExitPlan,
     snapshot,
     reconcile,

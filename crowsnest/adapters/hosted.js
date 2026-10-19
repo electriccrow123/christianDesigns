@@ -307,8 +307,9 @@ function createLiveBroker(rh, market) {
     try {
       r = await rh.call(tool, input, { write: true });
     } catch (err) {
-      if (err?.code === 'tool_error') throw err; // Robinhood answered: the order was refused
-      // No clear answer. A resend with the same ref_id is the same order to Robinhood, so one retry cannot double it.
+      // Only a lost reply is retried. Anything else (refused, declined by the viewer, not connected) means the call did not run.
+      if (!['server_unavailable', 'upstream_error'].includes(err?.code)) throw err;
+      // A resend with the same ref_id is the same order to Robinhood, so one retry cannot double it.
       await new Promise((res) => setTimeout(res, 1500));
       r = await rh.call(tool, input, { write: true });
     }
