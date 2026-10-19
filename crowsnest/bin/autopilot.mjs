@@ -9,6 +9,7 @@
 // Commands
 //   node bin/autopilot.mjs slot                 which check-in is due now (JSON)
 //   node bin/autopilot.mjs run <dir> [kind]     run or resume a cycle (refuses once out/outbox.json exists; --force overrides)
+//   node bin/autopilot.mjs deadline <dir>       whether the outbox may still be sent (JSON: now, sendBy, late)
 //   node bin/autopilot.mjs finalize <dir>       apply <dir>/results.json and rebuild the writes
 //
 // Writes to documents that already existed are exported as `update` diffs (changed keys only, removed
@@ -20,7 +21,7 @@ import { join, resolve } from 'node:path';
 import { createDesk, PATHS } from '../core/desk.js';
 import { createYahooMarket } from '../server/yahoo.js';
 import { marketStatus, isTradingDay } from '../core/market-clock.js';
-import { mapAccount, mapEquityQuotes, mapOptionQuotes, mapInstruments, buildSnapshot, equityInput, optionInput } from '../adapters/robinhood-map.js';
+import { mapAccount, mapEquityQuotes, mapOptionQuotes, mapInstruments, mapFundamentals, buildSnapshot, equityInput, optionInput } from '../adapters/robinhood-map.js';
 import { chunk } from '../core/util.js';
 
 const OCC = /^[A-Z.]+\d{6}[CP]\d{8}$/;
@@ -181,7 +182,11 @@ async function robinhoodState(dir, settings) {
     approvals: list(rh.approvals, 'approvals'),
     pnlTrades: list(rh.pnl, 'trades'),
   });
-  return { account, snap };
+  const fundamentals = {};
+  for (const payload of [].concat(rh.fundamentals || [])) {
+    for (const [sym, f] of Object.entries(mapFundamentals(payload))) fundamentals[sym] = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== undefined));
+  }
+  return { account, snap, fundamentals };
 }
 
 // ------------------------------------------------------------------ exports for ArtifactData
@@ -227,8 +232,16 @@ async function run(dir, kind) {
     console.log(JSON.stringify({ status: 'skipped', reason: 'The desk is in paper mode; the background autopilot only trades the live account.' }));
     return;
   }
-  const { snap } = await robinhoodState(dir, settingsDoc);
+  const { snap, fundamentals: rhFund } = await robinhoodState(dir, settingsDoc);
   const market = await cachedMarket(createYahooMarket({ watchlist: () => settingsDoc.watchlist || [] }), join(dir, 'cache', 'market.json'));
+  // Robinhood's fundamentals (market cap above all) win over Yahoo's, which can fail without a cookie.
+  const yahooFundamentals = market.fundamentals;
+  market.fundamentals = async (symbols) => {
+    const y = (await yahooFundamentals(symbols).catch(() => ({}))) || {};
+    const out = { ...y };
+    for (const sym of symbols) if (rhFund[sym]) out[sym] = { ...(y[sym] || {}), ...rhFund[sym] };
+    return out;
+  };
   const outbox = [];
   const cancels = [];
   const broker = {
@@ -277,6 +290,9 @@ async function run(dir, kind) {
   }
   // Orders the cycle wants sent: mark their intents "sending" until finalize records the outcome.
   const accountNumber = snap.account.number;
+  // Send nothing after this: prices go stale, and a market order sent after the close would run at the next open.
+  const st = marketStatus(new Date());
+  const sendBy = new Date(Date.now() + (st.session === 'regular' ? Math.min(15, Math.max(0, st.minutesToClose - 1)) : 10) * 60000).toISOString();
   const orders = [];
   for (const t of outbox) {
     const path = `${PATHS.intents}/${t.id}`;
@@ -299,7 +315,7 @@ async function run(dir, kind) {
       legsToResolve: isOption ? t.legs.map((l, index) => ({ index, occ: l.contractId, chain_symbol: t.symbol, expiration_date: l.expiration, strike_price: Number(l.strike).toFixed(4), type: l.right })).filter((l) => OCC.test(l.occ)) : [],
     });
   }
-  await writeJson(join(dir, 'out', 'outbox.json'), { accountNumber, orders, cancels: cancels.map((o) => ({ tool: o.kind === 'option' ? 'cancel_option_order' : 'cancel_equity_order', input: { account_number: accountNumber, order_id: o.id }, symbol: o.symbol })) });
+  await writeJson(join(dir, 'out', 'outbox.json'), { accountNumber, sendBy, orders, cancels: cancels.map((o) => ({ tool: o.kind === 'option' ? 'cancel_option_order' : 'cancel_equity_order', input: { account_number: accountNumber, order_id: o.id }, symbol: o.symbol })) });
   const dirtyPaths = [...store.dirty];
   await writeJson(join(dir, 'out', 'state.json'), { docs: Object.fromEntries(dirtyPaths.map((p) => [p, store.docs[p] ?? null])), versions, original: Object.fromEntries(dirtyPaths.filter((p) => original[p]).map((p) => [p, original[p]])), cycleId: cycle.id });
   const w = await exportWrites(dir, store, versions, original);
@@ -368,9 +384,14 @@ try {
     const kind = kindArg || dueKind().kind;
     if (kind === 'none') console.log(JSON.stringify({ status: 'skipped', reason: 'Market closed today.' }));
     else await run(resolve(dirArg), kind);
+  } else if (cmd === 'deadline' && dirArg) {
+    const box = await readJson(join(resolve(dirArg), 'out', 'outbox.json'));
+    if (!box) throw new Error('No out/outbox.json: run the cycle first.');
+    const late = !box.sendBy || Date.now() >= Date.parse(box.sendBy);
+    console.log(JSON.stringify({ now: new Date().toISOString(), sendBy: box.sendBy || null, late }));
   } else if (cmd === 'finalize' && dirArg) await finalize(resolve(dirArg));
   else {
-    console.error('Usage: node bin/autopilot.mjs slot | run <dir> [kind] | finalize <dir>');
+    console.error('Usage: node bin/autopilot.mjs slot | run <dir> [kind] | deadline <dir> | finalize <dir>');
     process.exitCode = 2;
   }
 } catch (err) {

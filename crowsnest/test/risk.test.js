@@ -154,3 +154,62 @@ test('adding to a holding counts what is already held toward the per-position ca
   const full = { stocks: [{ symbol: 'AAPL', qty: 10, available: 10, price: 200, value: 2000 }], options: [] };
   assert.equal(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: 4 }, ctx({ positions: full, exposure: { invested: 2000, options: 0 } })).decision, 'block');
 });
+
+test('exit plans: a missing or wrong-side stop or target is replaced by the mode default', () => {
+  const agent = { decisionId: 'd1', agent: true };
+  const noStop = evaluate({ symbol: 'AAPL', side: 'buy', quantity: 2, conviction: 4, exit: { stop: 0, target: 260 }, meta: agent }, ctx());
+  assert.ok(noStop.ticket.exit.stop > 0 && noStop.ticket.exit.stop < 200, `stop ${noStop.ticket.exit.stop}`);
+  assert.equal(noStop.ticket.exit.target, 260);
+  const wrong = evaluate({ symbol: 'AAPL', side: 'buy', quantity: 2, conviction: 4, exit: { stop: 210, target: 190 }, meta: agent }, ctx());
+  assert.ok(wrong.ticket.exit.stop < 200 && wrong.ticket.exit.target > 200);
+  assert.ok(wrong.checks.some((c) => c.id === 'exit' && c.level === 'warn'));
+});
+
+test('time stops must be real dates; anything else is dropped instead of selling at once', () => {
+  const t = normalizeTicket({ symbol: 'AAPL', side: 'buy', quantity: 1, exit: { stop: 190, target: 220, timeStop: '1 week' } });
+  assert.equal(t.exit.timeStop, null);
+  const positions = { stocks: [{ symbol: 'AAPL', qty: 1, available: 1, price: 200, avgCost: 200 }], options: [] };
+  const sig = exitSignals({ positions, plans: { AAPL: { stop: 190, target: 220, timeStop: '10/30/2026' } }, quotes: { AAPL: { price: 200 } }, params: resolveParams('balanced'), todayIso: '2026-10-19' });
+  assert.equal(sig.length, 0);
+});
+
+test('pattern day trading: agent entries and agent same-day closes block at 3 day trades; rule exits still go', () => {
+  const day = { startEquity: 10000, tradesOpened: 0, dayTradesRolling: 3, openedTodaySymbols: ['AAPL'] };
+  const account = { equity: 10000, buyingPower: 10000, cash: 10000, optionLevel: 'option_level_3', isMargin: true };
+  const held = { stocks: [{ symbol: 'AAPL', qty: 2, available: 2, value: 400 }], options: [] };
+  assert.equal(evaluate({ symbol: 'SPY', side: 'buy', quantity: 1, conviction: 4, meta: { agent: true } }, ctx({ day, account })).decision, 'block');
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true }, why: 'trim' }, ctx({ day, account, positions: held })).decision, 'block');
+  assert.notEqual(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2, meta: { agent: true }, why: 'Exit: price hit the stop.' }, ctx({ day, account, positions: held })).decision, 'block');
+});
+
+test('spreads and calendars do not open; unknown market cap blocks agent entries', () => {
+  const legs = [
+    { contractId: 'a', right: 'call', strike: 200, expiration: '2026-11-20', side: 'buy', bid: 5, ask: 5.2, mid: 5.1, openInterest: 900, dte: 32 },
+    { contractId: 'b', right: 'call', strike: 210, expiration: '2026-11-20', side: 'sell', bid: 2, ask: 2.2, mid: 2.1, openInterest: 900, dte: 32 },
+  ];
+  const r = evaluate({ kind: 'option', symbol: 'AAPL', quantity: 1, conviction: 4, legs }, ctx());
+  assert.equal(r.decision, 'block');
+  assert.match(r.summary, /Spreads are not traded yet/);
+  const cal = normalizeTicket({ kind: 'option', symbol: 'AAPL', quantity: 1, legs: [{ ...legs[0], side: 'sell' }, { ...legs[0], contractId: 'c', expiration: '2026-12-18', side: 'buy' }] });
+  assert.equal(cal.strategy, 'multi_leg');
+  const xyz = evaluate({ symbol: 'XYZQ', side: 'buy', quantity: 1, conviction: 4, meta: { decisionId: 'd1', agent: true } }, ctx({ quotes: { XYZQ: { price: 20, bid: 19.99, ask: 20.01 } }, fundamentals: {} }));
+  assert.equal(xyz.decision, 'block');
+  assert.match(xyz.summary, /Market cap/);
+  assert.notEqual(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: 4, meta: { decisionId: 'd1', agent: true } }, ctx({ fundamentals: {} })).decision, 'block');
+});
+
+test('agent entries need a conviction score; no new positions in the last 10 minutes', () => {
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, meta: { decisionId: 'd1', agent: true } }, ctx()).decision, 'block');
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: '4' }, ctx()).ticket.conviction, 4);
+  const late = { ...clock, minutesToClose: 6 };
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: 4 }, ctx({ clock: late })).decision, 'block');
+  const held = { stocks: [{ symbol: 'AAPL', qty: 2, available: 2 }], options: [] };
+  assert.notEqual(evaluate({ symbol: 'AAPL', side: 'sell', quantity: 2 }, ctx({ clock: late, positions: held })).decision, 'block');
+});
+
+test('fractional quantities are floored to 6 decimals; option exits price toward a fill', () => {
+  assert.equal(normalizeTicket({ symbol: 'MSFT', side: 'buy', quantity: 0.006538461538461538 }).quantity, 0.006538);
+  const positions = { stocks: [], options: [{ id: 'o1', symbol: 'AAPL', right: 'call', strike: 200, expiration: '2026-11-20', qty: 1, avgPrice: 5, mark: 3.9, bid: 3.83, ask: 3.97 }] };
+  const [sig] = exitSignals({ positions, plans: { o1: { stop: 4, target: 9 } }, quotes: {}, params: resolveParams('balanced'), todayIso: '2026-10-19' });
+  assert.ok(sig.ticket.price <= 3.83, `price ${sig.ticket.price}`);
+});

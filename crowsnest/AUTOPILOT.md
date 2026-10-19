@@ -28,6 +28,9 @@ below.
 7. Do not commit or push anything. The working folder is scratch space.
 8. Never run step 4 again once `out/outbox.json` exists: a new run would create new orders with new
    `ref_id`s. If `run` says the cycle already finished, continue at step 6 with the orders in that file.
+9. Send nothing late: before each order, run `node crowsnest/bin/autopilot.mjs deadline $WORK`. Once it
+   says `"late": true`, do not review or place that order or any after it; record each as `failed` with
+   the message `Too late to send`. The next check-in decides again with fresh prices.
 
 ## Steps
 
@@ -70,6 +73,7 @@ that it is the account with `agentic_allowed: true`. Call:
 | `optionOrders` | `get_option_orders` (account_number, created_at_gte = 7 days ago) |
 | `approvals` | `get_trade_approvals` (account_number) |
 | `pnl` | `get_pnl_trade_history` (account_number, span: "week") |
+| `fundamentals` | `get_equity_fundamentals` (symbols = `settings.watchlist` plus every stock held, at most 10 per call) — an **array** with each call's `data` object |
 
 Write them to `$WORK/inputs/robinhood.json` as one object with those keys, each value being the
 tool result's `data` object exactly as returned.
@@ -109,7 +113,11 @@ b. Check the live price (rule 3): `get_equity_quotes` for stock orders, `get_opt
 c. Call `review_tool` with `input` minus `ref_id`, plus the fields in `review_extra`.
 d. If the review has alerts → result `needs_review`. Otherwise call `place_tool` with `input`
    (including `ref_id`). If the response says the customer must approve → `pending_approval`; if it
-   placed → `sent`; if it failed → `failed` with the message.
+   placed → `sent`; if Robinhood refused it → `failed` with the message.
+   If the call itself failed with no clear answer (timeout, connection or server error), retry it once
+   with the same `ref_id` (hard rule 4). If that also gets no clear answer, call `get_equity_orders`
+   (or `get_option_orders`) with `account_number` and `created_at_gte` = today, and look for an order
+   whose `ref_id` equals this order's `ref_id`: if found, record `sent` with its id; if not, `failed`.
 e. For each entry in `cancels`, call its `tool` with its `input`.
 
 Write `$WORK/results.json`: an array with one entry for **every** order in the outbox, sent or not

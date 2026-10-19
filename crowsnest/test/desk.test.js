@@ -245,3 +245,40 @@ test('an owner trim keeps the exit plan for the shares that remain', async () =>
   assert.equal(r.status, 'filled');
   assert.equal((await desk.getExits()).AAPL?.stop, before.stop);
 });
+
+test('an unclear reply while placing is marked uncertain, then matched to the real order', async () => {
+  const store = memStore();
+  const market = fakeMarket();
+  const paper = createPaperBroker({ market, load: () => store.get('desk/paper'), save: (s) => store.set('desk/paper', s), startCash: 50000 });
+  const flaky = { ...paper, place: async (t, o) => {
+    await paper.place(t, o); // the order goes through...
+    throw Object.assign(new Error('Robinhood is temporarily unreachable.'), { code: 'upstream_error' }); // ...but the reply is lost
+  } };
+  const decisions = [{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x', exit: { stop: 1, target: 99999 } }];
+  const desk = createDesk({ market, brokers: { paper: flaky, live: null }, ai: scriptedAI(decisions), store, now: () => NOW });
+  await desk.runCycle('intraday');
+  const [i] = (await desk.listIntents()).filter((x) => x.symbol === 'AAPL');
+  assert.equal(i.status, 'failed');
+  assert.equal(i.broker.uncertain, true);
+  const changed = await desk.reconcile(await desk.snapshot({ force: true }));
+  const fixed = changed.find((x) => x.id === i.id);
+  assert.equal(fixed?.status, 'filled');
+  assert.equal((await desk.getExits()).AAPL?.intentId, i.id); // the agent's plan, not an adopted one
+});
+
+test('Operator exit edits merge into the drafted plan; saved tickets keep exact quantities', async () => {
+  const decisions = [{ id: 'd1', action: 'open', symbol: 'MSFT', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 0.37, when: 'now', why: 'x', exit: { stop: 1, target: 99999 } }];
+  const store = memStore();
+  const market = fakeMarket();
+  const paper = createPaperBroker({ market, load: () => store.get('desk/paper'), save: (s) => store.set('desk/paper', s), startCash: 1000 });
+  const ai = scriptedAI(decisions);
+  const json = ai.json;
+  ai.json = async (prompt, o) => (o.agent === 'operator' ? { tickets: [{ decisionId: 'd1', verdict: 'send', exit: { target: 88888 } }], positionReview: [], log: 'ok' } : json(prompt, o));
+  const desk = createDesk({ market, brokers: { paper, live: null }, ai, store, now: () => NOW });
+  await desk.runCycle('intraday');
+  const [i] = await desk.listIntents();
+  assert.equal(i.ticket.exit.target, 88888);
+  assert.equal(i.ticket.exit.stop, 1); // kept from the Honcho's plan
+  const saved = await store.get(`intents/${i.id}`);
+  assert.deepEqual(saved.ticket, JSON.parse(JSON.stringify(i.ticket)));
+});

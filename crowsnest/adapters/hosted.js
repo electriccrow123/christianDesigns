@@ -302,7 +302,16 @@ function createLiveBroker(rh, market) {
   async function place(t, { accountNumber } = {}) {
     const acct = await pickAccount(accountNumber);
     const an = acct.account_number;
-    const r = t.kind === 'stock' ? await rh.call('place_equity_order', { ...equityInput(t, an), ref_id: t.id }, { write: true }) : await rh.call('place_option_order', { ...optionInput(t, an), ref_id: t.id }, { write: true });
+    const [tool, input] = t.kind === 'stock' ? ['place_equity_order', { ...equityInput(t, an), ref_id: t.id }] : ['place_option_order', { ...optionInput(t, an), ref_id: t.id }];
+    let r;
+    try {
+      r = await rh.call(tool, input, { write: true });
+    } catch (err) {
+      if (err?.code === 'tool_error') throw err; // Robinhood answered: the order was refused
+      // No clear answer. A resend with the same ref_id is the same order to Robinhood, so one retry cannot double it.
+      await new Promise((res) => setTimeout(res, 1500));
+      r = await rh.call(tool, input, { write: true });
+    }
     return { ...placedOf(r), raw: r };
   }
 

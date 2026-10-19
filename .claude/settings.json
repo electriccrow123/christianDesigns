@@ -20,6 +20,7 @@
       "mcp__robinhood__get_option_orders",
       "mcp__robinhood__get_trade_approvals",
       "mcp__robinhood__get_pnl_trade_history",
+      "mcp__robinhood__get_equity_fundamentals",
       "mcp__robinhood__review_equity_order",
       "mcp__robinhood__place_equity_order",
       "mcp__robinhood__review_option_order",

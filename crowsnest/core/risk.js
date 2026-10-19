@@ -7,6 +7,13 @@ import { daysBetween } from './market-clock.js';
 
 const PDT_EQUITY = 25000;
 
+/** A YYYY-MM-DD date, or null. Anything else ("1 week", "10/30/2026") would compare wrongly as a string. */
+export const isoDate = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+
+// Companies big enough that an unknown market cap (a data-feed hiccup) should not block them.
+const ETF = /^(SPY|QQQ|DIA|IWM|VOO|VTI|IVV|SCHD|VYM|TLT|GLD|SLV|SMH|SOXX|XL[A-Z]{1,2})$/;
+const KNOWN_LARGE = new Set(['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'GOOG', 'META', 'TSLA', 'AVGO', 'JPM', 'V', 'MA', 'UNH', 'XOM', 'LLY', 'COST', 'NFLX', 'AMD', 'ORCL', 'CRM', 'ADBE', 'INTC', 'QCOM', 'BAC', 'WMT', 'HD', 'DIS', 'PLTR', 'COIN', 'UBER', 'SHOP', 'SOFI']);
+
 /**
  * Normalize a raw ticket (from the Operator agent, the chat, or the user) into the shape the gate
  * and brokers understand. Unknown fields are dropped.
@@ -19,15 +26,15 @@ export function normalizeTicket(raw = {}) {
     side: raw.side === 'sell' ? 'sell' : 'buy',
     positionEffect: raw.positionEffect === 'close' ? 'close' : 'open',
     strategy: raw.strategy || (raw.legs?.length ? null : 'stock'),
-    quantity: Number(raw.quantity) > 0 ? Number(raw.quantity) : null,
+    quantity: Number(raw.quantity) > 0 ? floorShares(Number(raw.quantity)) : null,
     dollars: Number(raw.dollars) > 0 ? round(Number(raw.dollars), 2) : null,
     orderType: ['market', 'limit', 'stop_market', 'stop_limit'].includes(raw.orderType) ? raw.orderType : 'limit',
     limitPrice: Number(raw.limitPrice) > 0 ? Number(raw.limitPrice) : null,
     stopPrice: Number(raw.stopPrice) > 0 ? Number(raw.stopPrice) : null,
     tif: raw.tif === 'gtc' ? 'gtc' : 'gfd',
     marketHours: raw.marketHours === 'extended_hours' ? 'extended_hours' : 'regular_hours',
-    exit: raw.exit ? { stop: Number(raw.exit.stop) || null, target: Number(raw.exit.target) || null, timeStop: raw.exit.timeStop || null } : null,
-    conviction: Number(raw.conviction) || null,
+    exit: raw.exit ? { stop: Number(raw.exit.stop) > 0 ? Number(raw.exit.stop) : null, target: Number(raw.exit.target) > 0 ? Number(raw.exit.target) : null, timeStop: isoDate(raw.exit.timeStop) } : null,
+    conviction: Number.isFinite(parseFloat(raw.conviction)) ? parseFloat(raw.conviction) : null,
     why: raw.why || raw.note || '',
     meta: raw.meta || {},
   };
@@ -62,6 +69,11 @@ export function normalizeTicket(raw = {}) {
   return t;
 }
 
+/** Robinhood takes at most 6 decimals of a share; round down so a sell never exceeds what is held. */
+function floorShares(q) {
+  return Number.isInteger(q) ? q : Math.floor(q * 1e6 + 1e-6) / 1e6;
+}
+
 function inferDirection(legs) {
   const net = legs.reduce((a, l) => a + (l.side === 'buy' ? 1 : -1) * (l.mid || (l.bid + l.ask) / 2 || 0) * l.ratio, 0);
   return net >= 0 ? 'debit' : 'credit';
@@ -74,7 +86,7 @@ export function inferStrategy(legs) {
     if (l.side === 'buy') return l.right === 'call' ? 'long_call' : 'long_put';
     return l.right === 'call' ? 'covered_call' : 'cash_secured_put';
   }
-  if (legs.length === 2 && legs[0].right === legs[1].right) {
+  if (legs.length === 2 && legs[0].right === legs[1].right && legs[0].expiration === legs[1].expiration && legs[0].strike !== legs[1].strike) {
     const buy = legs.find((l) => l.side === 'buy');
     const sell = legs.find((l) => l.side === 'sell');
     if (!buy || !sell) return 'unknown';
@@ -168,8 +180,8 @@ export function evaluate(ticketIn, ctx) {
     else t.marketHours = 'extended_hours';
   } else if (opening && clock.minutesSinceOpen != null && clock.minutesSinceOpen < p.avoidOpenMinutes) {
     block('open_window', 'Opening minutes', `New entries wait until ${p.avoidOpenMinutes} minutes after the open (now ${clock.minutesSinceOpen}).`);
-  } else if (opening && clock.minutesToClose != null && clock.minutesToClose < 5 && t.kind === 'option') {
-    block('close_window', 'Closing minutes', 'No new option positions in the last 5 minutes of the session.');
+  } else if (opening && clock.minutesToClose != null && clock.minutesToClose < 10) {
+    block('close_window', 'Closing minutes', 'No new positions in the last 10 minutes of the session: the order might not reach the market before the close.');
   }
 
   // 3. Instrument rules
@@ -178,7 +190,10 @@ export function evaluate(ticketIn, ctx) {
   if (opening && t.kind === 'stock' && px && px < p.minPrice) block('min_price', 'Stock price floor', `${t.symbol} at $${round(px, 2)} is under the $${p.minPrice} minimum for ${p.mode.name}.`);
   const capB = ctx.fundamentals?.[t.symbol]?.marketCapB;
   if (opening && capB != null && capB < p.minMarketCapB) block('market_cap', 'Company size', `${t.symbol} market cap $${round(capB, 2)}B is under the $${p.minMarketCapB}B minimum.`);
-  if (opening && capB == null && p.minMarketCapB >= 10 && !/^(SPY|QQQ|DIA|IWM|VOO|VTI|IVV|SCHD|VYM|XL[A-Z])$/.test(t.symbol)) warn('market_cap', 'Company size', 'Market cap unknown; confirm this is a large company or ETF.');
+  if (opening && capB == null && p.minMarketCapB > 0 && !ETF.test(t.symbol) && !KNOWN_LARGE.has(t.symbol)) {
+    if (t.meta?.agent) block('market_cap', 'Company size', `Market cap for ${t.symbol} is unavailable, so the $${p.minMarketCapB}B minimum cannot be checked.`);
+    else warn('market_cap', 'Company size', 'Market cap unknown; confirm this is a large company or ETF.');
+  }
 
   // 4. Strategy permission
   const strat = t.strategy || 'stock';
@@ -188,6 +203,7 @@ export function evaluate(ticketIn, ctx) {
     const have = optionLevelNumber(ctx.account?.optionLevel);
     if (opening && have < need) block('option_level', 'Options approval level', `${STRATEGIES[strat]?.name || strat} needs options level ${need}; the account has level ${have}.`);
     if (strat === 'unknown' || strat === 'multi_leg') block('strategy', 'Strategy allowed', 'Only single-leg and two-leg vertical spreads are supported.');
+    else if (opening && t.legs.length > 1) block('strategy', 'Strategy allowed', 'Spreads are not traded yet: their stop and target cannot be tracked as one position. Single-leg options and shares only.');
     if (t.legs.some((l) => l.side === 'sell' && l.positionEffect === 'open') && strat === 'covered_call') {
       const shares = ctx.positions?.stocks?.find((s) => s.symbol === t.symbol)?.qty || 0;
       const shortCalls = (ctx.positions?.options || []).filter((o) => o.symbol === t.symbol && o.right === 'call' && o.qty < 0).reduce((a, o) => a + Math.abs(o.qty), 0);
@@ -237,7 +253,7 @@ export function evaluate(ticketIn, ctx) {
       if (l.side === 'buy' && l.ask > 0 && t.price > l.ask * 1.1) block('price', 'Limit price', `Limit $${t.price} is far above the $${l.ask} ask.`);
       if (l.side === 'sell' && l.bid > 0 && t.price < l.bid * 0.9) block('price', 'Limit price', `Limit $${t.price} is far below the $${l.bid} bid.`);
     }
-    if (t.price) t.price = tickRound(t.price, { option: true });
+    if (t.price) t.price = tickRound(t.price, { option: true, direction: t.positionEffect === 'close' ? (t.legs[0]?.side === 'sell' ? 'down' : 'up') : 'nearest' });
   } else {
     const fractional = t.quantity && !Number.isInteger(t.quantity);
     if (t.dollars) {
@@ -279,6 +295,7 @@ export function evaluate(ticketIn, ctx) {
 
   // 7. Sizing
   let cost = orderCost(t, quote);
+  if (opening && t.kind === 'option' && !(cost > 0) && t.strategy !== 'covered_call') block('size', 'Position size', 'Could not work out what this option order costs, so it cannot be sized.');
   if (opening && cost > 0) {
     const isOpt = t.kind === 'option';
     const capPct = isOpt ? p.maxOptionPositionPct : p.maxPositionPct;
@@ -340,21 +357,46 @@ export function evaluate(ticketIn, ctx) {
     const used = ctx.day?.dayTradesRolling || 0;
     const closesSameDay = t.positionEffect === 'close' || (t.kind === 'stock' && t.side === 'sell');
     const openedToday = ctx.day?.openedTodaySymbols?.includes(t.symbol);
-    if (closesSameDay && openedToday && used >= 3) warn('pdt', 'Pattern day trading', `This would be day trade #${used + 1} in 5 business days on an account under $25k. Robinhood may restrict the account. Consider holding overnight unless this is a stop-loss exit.`);
+    const agent = t.meta?.agent !== false;
+    const ruleExit = /^Exit:/.test(t.why || '');
+    if (closesSameDay && openedToday && used >= 3) {
+      const msg = `This would be day trade #${used + 1} in 5 business days on an account under $25k. Robinhood may restrict the account.`;
+      if (agent && !ruleExit) block('pdt', 'Pattern day trading', `${msg} Hold overnight instead.`);
+      else warn('pdt', 'Pattern day trading', `${msg} Sent anyway: ${ruleExit ? 'stop-loss and target exits always go out' : 'you placed it yourself'}.`);
+    }
+    if (opening && agent && used >= 3) block('pdt', 'Pattern day trading', 'All 3 day trades for this 5-day window are used; a new position could not be stopped out today without a fourth.');
     if (opening && t.kind === 'option' && t.legs.some((l) => l.dte === 0) && used >= 3) block('pdt', 'Pattern day trading', 'No day-trade allowance left this week, and a 0DTE trade would force one.');
     else if (used >= 2) pass('pdt', 'Pattern day trading', `${used} of 3 day trades used in the last 5 business days.`);
   }
 
   // 10. Exit plan
   if (opening && ctx.limits?.requireExitPlan !== false) {
+    const d = defaultExit(t, quote, p);
     if (!t.exit || (!t.exit.stop && !t.exit.target)) {
-      t.exit = defaultExit(t, quote, p);
+      t.exit = d;
       pass('exit', 'Exit plan', `Added default exit: stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
-    } else pass('exit', 'Exit plan', `Stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
+    } else {
+      // Each side must exist and sit on the right side of the entry, or the mode's default replaces it.
+      const ref = t.kind === 'stock' ? t.limitPrice || quote.price : t.price;
+      const long = t.kind === 'stock' || t.direction !== 'credit';
+      const fixed = [];
+      if (!(t.exit.stop > 0) || (ref > 0 && (long ? t.exit.stop >= ref : t.exit.stop <= ref))) {
+        t.exit.stop = d.stop;
+        fixed.push('stop');
+      }
+      if (!(t.exit.target > 0) || (ref > 0 && (long ? t.exit.target <= ref : t.exit.target >= ref))) {
+        t.exit.target = d.target;
+        fixed.push('target');
+      }
+      t.exit.basis = d.basis;
+      if (fixed.length) warn('exit', 'Exit plan', `The ${fixed.join(' and ')} was missing or on the wrong side of the entry; used the mode's default. Stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
+      else pass('exit', 'Exit plan', `Stop ${t.exit.stop ?? '—'}, target ${t.exit.target ?? '—'}.`);
+    }
   }
 
   // 11. Conviction
   if (opening && t.conviction != null && t.conviction < p.minConviction) block('conviction', 'Conviction', `Conviction ${t.conviction}/5 is below the ${p.minConviction}/5 minimum for ${p.mode.name}.`);
+  else if (opening && t.conviction == null && t.meta?.decisionId && t.meta?.agent !== false) block('conviction', 'Conviction', `The decision has no conviction score; ${p.mode.name} needs at least ${p.minConviction}/5.`);
 
   const blocked = checks.some((c) => c.level === 'block' && !c.ok);
   const resized = checks.some((c) => c.id === 'size' && c.level === 'warn');
@@ -423,7 +465,7 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
     let reason = null;
     if (plan?.stop && px <= plan.stop) reason = `price $${round(px, 2)} hit the $${plan.stop} stop`;
     else if (plan?.target && px >= plan.target) reason = `price $${round(px, 2)} reached the $${plan.target} target`;
-    else if (plan?.timeStop && todayIso >= plan.timeStop) reason = `time stop ${plan.timeStop} reached`;
+    else if (isoDate(plan?.timeStop) && todayIso >= plan.timeStop) reason = `time stop ${plan.timeStop} reached`;
     if (reason) {
       const whole = Number.isInteger(qtyAvail);
       out.push({
@@ -454,7 +496,7 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
     const days = o.expiration && todayIso ? daysBetween(todayIso, o.expiration) : null;
     if (!reason && days === 0 && !params.allowZeroDte) reason = 'expires today; closing to avoid assignment or a worthless expiry';
     if (!reason && days === 0 && clock?.minutesToClose != null && clock.minutesToClose <= 20) reason = 'expires in the last 20 minutes of the session';
-    if (!reason && plan?.timeStop && todayIso >= plan.timeStop) reason = `time stop ${plan.timeStop} reached`;
+    if (!reason && isoDate(plan?.timeStop) && todayIso >= plan.timeStop) reason = `time stop ${plan.timeStop} reached`;
     if (reason) {
       const price = long ? Math.max(0.01, o.bid || mark * 0.97) : (o.ask || mark * 1.03);
       out.push({
@@ -464,7 +506,7 @@ export function exitSignals({ positions, plans = {}, quotes = {}, params, todayI
           symbol: o.symbol,
           positionEffect: 'close',
           quantity: Math.abs(o.qty),
-          price: tickRound(price, { option: true }),
+          price: tickRound(price, { option: true, direction: long ? 'down' : 'up' }),
           strategy: long ? (o.right === 'call' ? 'long_call' : 'long_put') : o.right === 'call' ? 'covered_call' : 'cash_secured_put',
           legs: [{ contractId: o.id, right: o.right, strike: o.strike, expiration: o.expiration, side: long ? 'sell' : 'buy', positionEffect: 'close', bid: o.bid, ask: o.ask, mid: mark }],
           why: `Exit: ${reason}.`,

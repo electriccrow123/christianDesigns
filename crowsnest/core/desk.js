@@ -13,7 +13,7 @@ import { marketStatus, todayNY, addDays, daysBetween, weekDays } from './market-
 import { analyze, brief } from './patterns.js';
 import { marketRegime, INDEX_ETFS, FEAR_GAUGE } from './regime.js';
 import { resolveParams, modeRules, adjustableSpec, modeById, modeByLevel, DEFAULT_LIMITS } from './modes.js';
-import { evaluate, normalizeTicket, exitSignals, adoptionPlans, exposure, countDayTrades, inferStrategy } from './risk.js';
+import { evaluate, normalizeTicket, exitSignals, adoptionPlans, exposure, countDayTrades, inferStrategy, isoDate } from './risk.js';
 import { enrichContract, rankContracts, expectedMove, contractLabel, MULTIPLIER, STRATEGIES } from './options.js';
 import { AGENTS, scoutPrompt, analystPrompt, honchoPrompt, operatorPrompt, chatRules, explainPrompt, deepDivePrompt } from './agents.js';
 import { weekEvents, emptyWeekPlan, emptyDayPlan } from './planner.js';
@@ -249,6 +249,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     if (vehicle === 'stock' && decision.direction === 'bearish') {
       if (params.strategies.includes('long_put')) {
         vehicle = 'long_put';
+        base.exit = null; // its stop and target were stock prices; the gate sets premium-based ones
         notes.push('Bearish stock idea converted to a long put (no short selling).');
       } else return { ticket: null, candidates: [], notes: ['Bearish stock ideas need puts, which this mode does not allow.'] };
     }
@@ -340,8 +341,14 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const toLeg = (c, side) => ({ contractId: c.contractId, right: c.right, strike: c.strike, expiration: c.expiration, side, positionEffect: 'open', bid: c.bid, ask: c.ask, mid: c.mid, delta: c.delta, openInterest: c.openInterest, dte: c.dte, spreadPct: c.spreadPct });
     if (t.kind === 'option' && t.positionEffect === 'open') {
       if (Array.isArray(op.legs) && op.legs.length === t.legs.length && op.legs.every((l) => cands.has(l.contractId))) {
+        const before = t.direction;
         t.legs = op.legs.map((l, i) => toLeg(cands.get(l.contractId), l.side === 'sell' || l.side === 'buy' ? l.side : t.legs[i].side));
         t.strategy = inferStrategy(t.legs);
+        delete t.direction; // normalizeTicket infers it again from the new legs
+        delete t.price;
+        if (Number(op.limitPrice) > 0) t.price = Number(op.limitPrice);
+        t.direction = normalizeTicket({ ...t, kind: 'option' }).direction;
+        if (t.direction !== before && !op.exit) t.exit = null; // a debit plan does not fit a credit trade
       } else if (op.contractId && cands.has(op.contractId) && t.legs.length === 1) {
         t.legs = [toLeg(cands.get(op.contractId), t.legs[0].side)];
       }
@@ -366,7 +373,14 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       if (Number(op.limitPrice) > 0 && t.orderType === 'limit') t.limitPrice = Number(op.limitPrice);
     }
     if (op.tif === 'gtc' || op.tif === 'gfd') t.tif = op.tif;
-    if (op.exit && (op.exit.stop || op.exit.target)) t.exit = { stop: Number(op.exit.stop) || null, target: Number(op.exit.target) || null, timeStop: op.exit.timeStop || null };
+    if (op.exit && typeof op.exit === 'object') {
+      // Merge: fields the Operator leaves out keep the drafted values.
+      const e = { ...(t.exit || {}) };
+      if (Number(op.exit.stop) > 0) e.stop = Number(op.exit.stop);
+      if (Number(op.exit.target) > 0) e.target = Number(op.exit.target);
+      if (op.exit.timeStop !== undefined) e.timeStop = isoDate(op.exit.timeStop);
+      if (Object.keys(e).length) t.exit = e;
+    }
     if (op.note) t.meta.operatorNote = String(op.note).slice(0, 400);
     return normalizeTicket(t);
   }
@@ -374,7 +388,9 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
   // ------------------------------------------------------------ intents
   async function saveIntent(intent) {
     intent.updatedAt = Date.now();
-    await store.set(`${P.intents}/${intent.id}`, slim(intent, { maxArray: 40, maxString: 1500 }));
+    const doc = slim(intent, { maxArray: 40, maxString: 1500 });
+    if (intent.ticket) doc.ticket = JSON.parse(JSON.stringify(intent.ticket)); // exact quantities and prices: Send reuses them
+    await store.set(`${P.intents}/${intent.id}`, doc);
     return intent;
   }
   async function listIntents({ limit = 120 } = {}) {
@@ -458,6 +474,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     // Reserve this order's money and slot for the rest of the cycle unless it ends up not sent.
     const reserve = () => addPending(pending, gate.ticket, gate.cost);
     const broker = await brokerFor(settings);
+    let placing = false;
     const send = sendMode === 'force' || sendMode === 'auto';
     if (!send) {
       reserve(); // queued for the owner: still counts, they may send it
@@ -475,6 +492,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         result.broker = { alerts: pv.alerts, message: pv.message || 'Preview failed.' };
         return result;
       }
+      placing = true;
       const placed = await broker.place(gate.ticket, { accountNumber: settings.accountNumber });
       result.sent = placed.ok !== false;
       if (result.sent) reserve();
@@ -483,7 +501,9 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       cache.snapshotAt = 0;
     } catch (err) {
       result.status = 'failed';
-      result.broker = { message: err?.message || String(err), code: err?.code };
+      // A dropped connection while placing does not prove the order was not placed.
+      const uncertain = placing && err?.code !== 'tool_error' && err?.code !== 'cancelled';
+      result.broker = { message: uncertain ? `${err?.message || 'No reply from Robinhood.'} The order may still have gone through; the desk will check Robinhood's order list.` : err?.message || String(err), code: err?.code, uncertain };
     }
     return result;
   }
@@ -760,7 +780,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         if (!held || !d.exit) continue;
         const patch = {};
         for (const k of ['stop', 'target']) if (Number(d.exit[k]) > 0) patch[k] = Number(d.exit[k]);
-        if (d.exit.timeStop !== undefined) patch.timeStop = d.exit.timeStop || null;
+        if (d.exit.timeStop !== undefined) patch.timeStop = isoDate(d.exit.timeStop);
         await setExitPlan(key, { ...exitPlansNow[key], ...patch, adopted: false, live: !!snap.live, note: `Set by the Head Honcho: ${firstSentenceOf(d.why)}` });
         say('honcho', `New exit plan for ${d.symbol}`, `Stop ${patch.stop ?? '—'}, target ${patch.target ?? '—'}${patch.timeStop ? `, time stop ${patch.timeStop}` : ''}.`);
       }
@@ -973,7 +993,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
 
   /** Match sent intents to broker orders and update their status. */
   async function reconcile(snap) {
-    const intents = (await listIntents({ limit: 80 })).filter((i) => ['sent', 'pending_approval', 'working', 'sending', 'queued', 'needs_review'].includes(i.status));
+    const intents = (await listIntents({ limit: 80 })).filter((i) => ['sent', 'pending_approval', 'working', 'sending', 'queued', 'needs_review'].includes(i.status) || (i.status === 'failed' && i.broker?.uncertain && Date.now() - (i.updatedAt || 0) < 24 * 3600 * 1000));
     if (!intents.length) return [];
     const changed = [];
     for (const i of intents) {
@@ -984,10 +1004,15 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
         else if (['cancelled', 'canceled'].includes(ord.state)) status = 'cancelled';
         else if (['rejected', 'failed', 'voided'].includes(ord.state)) status = 'rejected';
         else if (ord.state === 'partially_filled') status = 'working';
+        else if (i.status === 'failed') status = 'sent'; // it did reach Robinhood and is still open
+      } else if (i.status === 'failed') {
+        // uncertain and not found yet: leave it as it is
       } else if (i.status === 'sending' && Date.now() - i.updatedAt > 30 * 60 * 1000) status = 'failed'; // the autopilot never confirmed it
       else if (i.status !== 'sending' && Date.now() - (i.updatedAt || i.createdAt || 0) > 20 * 3600 * 1000) status = 'expired'; // no matching order after a day
       if (status !== i.status) {
-        const next = await saveIntent({ ...i, status, fill: ord ? { avgPrice: ord.avgPrice, qty: ord.filledQty, at: ord.updatedAt } : i.fill });
+        const found = i.status === 'failed' && ord;
+        const next = await saveIntent({ ...i, status, fill: ord ? { avgPrice: ord.avgPrice, qty: ord.filledQty, at: ord.updatedAt } : i.fill, broker: found ? { ...i.broker, orderId: ord.id, uncertain: false, message: 'Found on Robinhood after an unclear reply.' } : i.broker });
+        if (found && ['filled', 'sent', 'working'].includes(status)) await rememberExit(next, snap);
         changed.push(next);
       }
     }
