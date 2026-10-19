@@ -145,3 +145,12 @@ test('positions without a plan are adopted from today’s price, not sold', asyn
   assert.equal(plans.o9.stop, 1.2);
   assert.equal(adoptionPlans({ positions, plans, quotes: {}, params }).COIN, undefined);
 });
+
+test('adding to a holding counts what is already held toward the per-position cap', () => {
+  const held = { stocks: [{ symbol: 'AAPL', qty: 8, available: 8, price: 200, value: 1600 }], options: [] };
+  const r = evaluate({ symbol: 'AAPL', side: 'buy', quantity: 5, conviction: 4 }, ctx({ positions: held, exposure: { invested: 1600, options: 0 } }));
+  assert.equal(r.decision, 'resize');
+  assert.ok(r.cost <= 400 + 1, `cost ${r.cost}`); // 20% of $10k = $2,000 minus $1,600 held
+  const full = { stocks: [{ symbol: 'AAPL', qty: 10, available: 10, price: 200, value: 2000 }], options: [] };
+  assert.equal(evaluate({ symbol: 'AAPL', side: 'buy', quantity: 1, conviction: 4 }, ctx({ positions: full, exposure: { invested: 2000, options: 0 } })).decision, 'block');
+});

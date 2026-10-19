@@ -453,8 +453,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       // 1. Gather
       onStep('system', { title: 'Gathering data' });
       const settings = await getSettings();
-      let state = await getState();
       const snap = await snapshot({ force: true });
+      let state = await getState(); // after the snapshot: it refreshes the day's starting equity
       const params0 = resolveParams(settings.mode, state.paramOverrides, settings.limits);
       // Auto-downgrade on drawdown
       let modeId = settings.mode;
@@ -631,6 +631,19 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
           drafts.push({ decision: d, ...dr });
         } else nonTrade.push(d);
       }
+      // The Head Honcho's exit changes apply first, so the Operator sees and builds on them.
+      for (const d of nonTrade.filter((x) => x.action === 'adjust_exit')) {
+        const key = d.contractId || d.symbol;
+        const held = snap.stocks.some((x) => x.symbol === key) || snap.options.some((x) => x.id === key);
+        if (!held || !d.exit) continue;
+        const patch = {};
+        for (const k of ['stop', 'target']) if (Number(d.exit[k]) > 0) patch[k] = Number(d.exit[k]);
+        if (d.exit.timeStop !== undefined) patch.timeStop = d.exit.timeStop || null;
+        await setExitPlan(key, { ...exitPlansNow[key], ...patch, adopted: false, note: `Set by the Head Honcho: ${firstSentenceOf(d.why)}` });
+        say('honcho', `New exit plan for ${d.symbol}`, `Stop ${patch.stop ?? '—'}, target ${patch.target ?? '—'}${patch.timeStop ? `, time stop ${patch.timeStop}` : ''}.`);
+      }
+      const plansNow = await getExits();
+      const posForOperator = posView.map((p) => ({ ...p, exit: plansNow[p.kind === 'stock' ? p.symbol : p.contractId] }));
       let operator = null;
       if (drafts.length || posView.length) {
         onStep('operator', { title: 'Building orders' });
@@ -642,8 +655,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
               modeText: modeRules(finalParams),
               account,
               drafts: drafts.map((d) => ({ decisionId: d.decision.id, decision: { action: d.decision.action, symbol: d.decision.symbol, vehicle: d.decision.vehicle, direction: d.decision.direction, sizePct: d.decision.sizePct, conviction: d.decision.conviction, exit: d.decision.exit, why: d.decision.why }, draft: d.ticket ? slim(d.ticket, { maxArray: 4 }) : null, candidates: d.candidates, notes: d.notes })),
-              positions: posView,
-              plans: exitPlansNow,
+              positions: posForOperator,
+              plans: plansNow,
               quotes: Object.fromEntries(uniq(drafts.map((d) => d.decision.symbol)).map((s) => [s, quotes[s] && { price: quotes[s].price, bid: quotes[s].bid, ask: quotes[s].ask }])),
               execution: live ? (settings.execution === 'auto' ? 'LIVE, orders that pass the risk gate are sent automatically' : 'LIVE, the owner presses Send on each order') : 'PAPER (simulated)',
             }),
@@ -658,13 +671,22 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
       if (operator) {
         cycle.operator = slim(operator, { maxArray: 12, maxString: 500 });
         say('operator', 'Orders built', [operator.log, ...(operator.tickets || []).map((t) => `• ${t.decisionId}: ${t.verdict}${t.vetoReason ? ` — ${t.vetoReason}` : ''}${t.note ? ` — ${t.note}` : ''}`)].filter(Boolean).join('\n'));
-        // Position reviews can move stops/targets
+        // Position reviews may tighten a stop (never loosen it) and move a target, within sane bounds.
         for (const r of operator.positionReview || []) {
           if (!r.key || (!r.newStop && !r.newTarget)) continue;
+          const stock = snap.stocks.find((x) => x.symbol === r.key);
+          const opt = snap.options.find((x) => x.id === r.key);
+          if (!stock && !opt) continue;
+          const long = stock ? true : opt.qty > 0;
+          const px = stock ? quotes[stock.symbol]?.price ?? stock.price : opt.mark;
+          const cur = plansNow[r.key] || {};
           const patch = {};
-          if (Number(r.newStop) > 0) patch.stop = Number(r.newStop);
-          if (Number(r.newTarget) > 0) patch.target = Number(r.newTarget);
-          await setExitPlan(r.key, { ...exitPlansNow[r.key], ...patch, note: r.note });
+          const ns = Number(r.newStop);
+          if (ns > 0 && px > 0 && (long ? ns < px && (!(cur.stop > 0) || ns > cur.stop) : ns > px && (!(cur.stop > 0) || ns < cur.stop))) patch.stop = ns;
+          const nt = Number(r.newTarget);
+          if (nt > 0 && px > 0 && (long ? nt > px : nt < px)) patch.target = nt;
+          if (!Object.keys(patch).length) continue;
+          await setExitPlan(r.key, { ...cur, ...patch, note: `Operator: ${String(r.note || '').slice(0, 240)}` });
         }
       }
 
@@ -739,12 +761,7 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
           } else if (ord) say('operator', `Cancel ${d.symbol}`, 'Waiting for you: press Cancel on the order in the Desk tab.');
           continue;
         }
-        if (d.action === 'adjust_exit') {
-          const key = d.contractId || d.symbol;
-          await setExitPlan(key, { ...exitPlansNow[key], ...(d.exit || {}) });
-          say('operator', `New exit plan for ${d.symbol}`, `Stop ${d.exit?.stop ?? '—'}, target ${d.exit?.target ?? '—'}${d.exit?.timeStop ? `, time stop ${d.exit.timeStop}` : ''}.`);
-          continue;
-        }
+        if (d.action === 'adjust_exit') continue; // applied before the Operator step
         if (d.action === 'hold') continue;
         await saveIntent({
           id: uuid(),
@@ -815,8 +832,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     const intent = await store.get(`${P.intents}/${intentId}`);
     if (!intent?.ticket) throw new Error('This intention has no order ticket.');
     const settings = await getSettings();
-    const state = await getState();
     const snap = await snapshot({ force: true });
+    const state = await getState();
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
     const symbols = [intent.ticket.symbol];
     const quotes = Object.fromEntries((await market.quotes(symbols).catch(() => [])).map((q) => [q.symbol, q]));
@@ -858,8 +875,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
   /** Close (or trim) one position now, at the owner's request. Still passes the risk gate. */
   async function closePosition({ symbol, contractId, fraction = 1 }) {
     const settings = await getSettings();
-    const state = await getState();
     const snap = await snapshot({ force: true });
+    const state = await getState();
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
     const quotes = Object.fromEntries((await market.quotes([symbol]).catch(() => [])).map((q) => [q.symbol, q]));
     const decision = { id: 'owner', action: fraction < 1 ? 'trim' : 'close', symbol, contractId, vehicle: contractId ? 'option' : 'stock', why: 'Closed by the owner from the Desk tab.', conviction: 5 };
@@ -901,8 +918,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
   /** Deterministic exit monitor (no AI). Returns the exits found and what happened to them. */
   async function checkExits({ execute = false, snap: given } = {}) {
     const settings = await getSettings();
-    const state = await getState();
     const snap = given || (await snapshot({ force: true }));
+    const state = await getState();
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
     let plans = await getExits();
     const syms = snap.stocks.map((s) => s.symbol);
@@ -933,8 +950,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
   // ------------------------------------------------------------ chat with the Head Honcho
   async function chatContext() {
     const settings = await getSettings();
-    const state = await getState();
     const snap = await snapshot().catch(() => null);
+    const state = await getState();
     const plan = await getPlan();
     const last = (await store.list(P.cycles, { orderBy: 'at', dir: 'desc', limit: 2 }).catch(() => []))[0];
     const intents = (await listIntents({ limit: 30 })).filter((i) => ACTIVE_INTENT.has(i.status)).slice(0, 10);
@@ -1027,8 +1044,8 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
 
   async function proposeFromChat(inp) {
     const settings = await getSettings();
-    const state = await getState();
     const snap = await snapshot();
+    const state = await getState();
     const params = resolveParams(settings.mode, state.paramOverrides, settings.limits);
     const sym = String(inp.symbol || '').toUpperCase();
     const quotes = Object.fromEntries((await market.quotes([sym]).catch(() => [])).map((q) => [q.symbol, q]));
@@ -1144,6 +1161,11 @@ export function createDesk({ market, brokers, ai, store, now = () => new Date(),
     brokerFor,
     paths: P,
   };
+}
+
+function firstSentenceOf(t = '') {
+  const m = String(t || '').match(/^.{0,200}?[.!?](\s|$)/);
+  return (m ? m[0] : String(t || '').slice(0, 200)).trim();
 }
 
 export function statusText(s) {

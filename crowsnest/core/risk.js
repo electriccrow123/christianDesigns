@@ -280,6 +280,14 @@ export function evaluate(ticketIn, ctx) {
     const capPct = isOpt ? p.maxOptionPositionPct : p.maxPositionPct;
     let cap = (equity * capPct) / 100;
     const reasons = [`${capPct}% of account = $${round(cap, 2)}`];
+    // Adding to a holding counts what is already held toward the same per-position cap.
+    const heldValue = isOpt
+      ? (ctx.positions?.options || []).filter((o) => o.symbol === t.symbol && o.qty > 0).reduce((a, o) => a + Math.abs(o.value || 0), 0)
+      : Math.abs(ctx.positions?.stocks?.find((s) => s.symbol === t.symbol)?.value || 0);
+    if (heldValue > 0) {
+      cap = Math.max(0, cap - heldValue);
+      reasons.push(`$${round(heldValue, 2)} of ${t.symbol} already held leaves $${round(cap, 2)}`);
+    }
     const investedNow = ctx.exposure?.invested ?? 0;
     const roomInvested = (equity * p.maxInvestedPct) / 100 - investedNow;
     if (roomInvested < cap) {

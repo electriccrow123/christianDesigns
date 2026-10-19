@@ -8,7 +8,7 @@ export const AGENTS = {
     name: 'Head Honcho',
     role: 'Chief strategist',
     blurb: 'Runs the team and talks with you. Sets the weekly and daily plan, makes the final buy/sell calls, and explains them.',
-    tier: 'complex',
+    tier: 'default',
     effort: 'high',
   },
   operator: {
@@ -205,6 +205,7 @@ Ticket rules you must know:
 - Choose contracts ONLY from each draft's "candidates" list (by contractId). Never invent a contract id.
 - If the account cannot afford even one contract, switch to stock (dollar amount) or veto.
 - Every opening ticket needs an exit plan: stop and target (stock price for stock, option premium for options).
+- Exit plans on open positions were set by the Head Honcho or the risk rules. In positionReview you may TIGHTEN a stop (move it closer to the price) or move a target; code ignores any stop you loosen. Leave a plan alone when it is already sensible.
 
 ${HONESTY}
 

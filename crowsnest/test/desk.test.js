@@ -144,3 +144,37 @@ test('owner can close a position and the exit plan is cleared', async () => {
   assert.equal(snap.stocks.length, 0);
   assert.equal((await desk.getExits()).AAPL, undefined);
 });
+
+test('the Head Honcho’s exit changes apply before the Operator, who may only tighten stops', async () => {
+  const { desk, store, paper } = setup([{ id: 'd1', action: 'open', symbol: 'AAPL', vehicle: 'stock', direction: 'bullish', conviction: 4, sizePct: 10, when: 'now', why: 'x' }]);
+  await desk.runCycle('intraday');
+  const px = (await fakeMarket().quotes(['AAPL']))[0].price;
+  let operatorPrompt = '';
+  const ai2 = {
+    async json(prompt, { agent }) {
+      if (agent === 'scout') return { marketRead: 'ok', setups: [], avoid: [], keyLevels: [] };
+      if (agent === 'analyst') return { summary: 'ok', ideas: [], eventRisks: [], avoid: [] };
+      if (agent === 'honcho') return { headline: 'Raise the stop', summary: 'x', marketView: { label: 'Neutral', confidence: 50, why: '' }, decisions: [{ id: 'd1', action: 'adjust_exit', symbol: 'AAPL', vehicle: 'stock', exit: { stop: round2(px * 0.97), target: round2(px * 1.1), timeStop: null }, why: 'Raise the stop under support. More text.' }], today: null, week: null, paramAdjustments: {}, memory: [], messageToOwner: '' };
+      if (agent === 'operator') {
+        operatorPrompt = prompt;
+        return { tickets: [], positionReview: [{ key: 'AAPL', status: 'ok', newStop: round2(px * 0.9), newTarget: round2(px * 1.2), note: 'looser stop' }], log: 'ok' };
+      }
+      throw new Error('unexpected agent');
+    },
+    async text() {
+      return { text: 'ok' };
+    },
+  };
+  const desk2 = createDesk({ market: fakeMarket(), brokers: { paper, live: null }, ai: ai2, store, now: () => NOW });
+  const cycle = await desk2.runCycle('intraday');
+  assert.equal(cycle.status, 'done', cycle.error);
+  assert.ok(operatorPrompt.includes(String(round2(px * 0.97))), 'operator saw the new stop');
+  const exit = (await desk2.getExits()).AAPL;
+  assert.equal(exit.stop, round2(px * 0.97)); // the looser 10% stop was ignored
+  assert.equal(exit.target, round2(px * 1.2)); // targets may move
+  assert.equal(exit.adopted, false);
+});
+
+function round2(x) {
+  return Math.round(x * 100) / 100;
+}
